@@ -452,6 +452,171 @@ pub fn embedText(
     return self.embedContent(model, content, .{});
 }
 
+// --- Files ---
+
+pub const UploadFileConfig = struct {
+    name: ?[]const u8 = null,
+    displayName: ?[]const u8 = null,
+    mimeType: ?[]const u8 = null,
+};
+
+pub fn uploadFile(
+    self: *Client,
+    data: []const u8,
+    config: UploadFileConfig,
+) !ParsedResponse(types.UploadFileResponse) {
+    if (self.api_key.len == 0) return error.MissingApiKey;
+
+    // Stage 1: Initialize resumable upload
+    const create_url = try std.fmt.allocPrint(self.allocator, "{s}/upload/{s}/files", .{ self.base_url, self.api_version });
+    defer self.allocator.free(create_url);
+
+    // Build metadata JSON
+    var metadata_buf: std.Io.Writer.Allocating = .init(self.allocator);
+    defer metadata_buf.deinit();
+    std.json.Stringify.value(types.UploadFileRequest{
+        .file = .{
+            .name = config.name,
+            .displayName = config.displayName,
+            .mimeType = config.mimeType,
+        },
+    }, .{ .emit_null_optional_fields = false }, &metadata_buf.writer) catch
+        return error.OutOfMemory;
+    const metadata = metadata_buf.written();
+
+    const mime_type = config.mimeType orelse "application/octet-stream";
+
+    // Make the initialization request
+    const uri = try std.Uri.parse(create_url);
+    var req = try self.http_client.request(.POST, uri, .{
+        .extra_headers = &.{
+            .{ .name = "x-goog-api-key", .value = self.api_key },
+            .{ .name = "X-Goog-Upload-Protocol", .value = "resumable" },
+            .{ .name = "X-Goog-Upload-Command", .value = "start" },
+            .{ .name = "X-Goog-Upload-Header-Content-Type", .value = mime_type },
+        },
+        .headers = .{
+            .content_type = .{ .override = "application/json" },
+        },
+        .redirect_behavior = .unhandled,
+    });
+    defer req.deinit();
+
+    req.transfer_encoding = .{ .content_length = metadata.len };
+    var bw = try req.sendBodyUnflushed(&.{});
+    try bw.writer.writeAll(metadata);
+    try bw.end();
+    try req.connection.?.flush();
+
+    var redirect_buf: [0]u8 = undefined;
+    var init_response = try req.receiveHead(&redirect_buf);
+
+    const init_status = @intFromEnum(init_response.head.status);
+    if (init_status < 200 or init_status >= 300) {
+        std.log.err("Gemini file upload init error (HTTP {d})", .{init_status});
+        return error.ApiError;
+    }
+
+    // Find X-Goog-Upload-Url in response headers (before reader() invalidates strings)
+    const upload_url = blk: {
+        var it = init_response.head.iterateHeaders();
+        while (it.next()) |header| {
+            if (std.ascii.eqlIgnoreCase(header.name, "x-goog-upload-url")) {
+                break :blk try self.allocator.dupe(u8, header.value);
+            }
+        }
+        return error.ApiError;
+    };
+    defer self.allocator.free(upload_url);
+
+    // Consume the init response body
+    var transfer_buf: [256]u8 = undefined;
+    const init_reader = init_response.reader(&transfer_buf);
+    _ = init_reader.discardRemaining() catch {};
+
+    // Stage 2: Upload the data
+    const upload_uri = try std.Uri.parse(upload_url);
+    var upload_req = try self.http_client.request(.POST, upload_uri, .{
+        .extra_headers = &.{
+            .{ .name = "x-goog-api-key", .value = self.api_key },
+            .{ .name = "X-Goog-Upload-Command", .value = "upload, finalize" },
+            .{ .name = "X-Goog-Upload-Offset", .value = "0" },
+        },
+        .headers = .{
+            .content_type = .{ .override = mime_type },
+        },
+        .redirect_behavior = .unhandled,
+    });
+    defer upload_req.deinit();
+
+    upload_req.transfer_encoding = .{ .content_length = data.len };
+    var upload_bw = try upload_req.sendBodyUnflushed(&.{});
+    try upload_bw.writer.writeAll(data);
+    try upload_bw.end();
+    try upload_req.connection.?.flush();
+
+    var upload_redirect_buf: [0]u8 = undefined;
+    var upload_response = try upload_req.receiveHead(&upload_redirect_buf);
+
+    const upload_status = @intFromEnum(upload_response.head.status);
+    if (upload_status < 200 or upload_status >= 300) {
+        std.log.err("Gemini file upload error (HTTP {d})", .{upload_status});
+        return error.ApiError;
+    }
+
+    // Read and parse response body
+    var response_buf: std.Io.Writer.Allocating = .init(self.allocator);
+    errdefer response_buf.deinit();
+
+    var upload_transfer_buf: [4096]u8 = undefined;
+    const body_reader = upload_response.reader(&upload_transfer_buf);
+    _ = body_reader.streamRemaining(&response_buf.writer) catch return error.ApiError;
+
+    const body = response_buf.written();
+    if (body.len == 0) return error.EmptyResponse;
+
+    const parsed = try std.json.parseFromSlice(types.UploadFileResponse, self.allocator, body, .{ .ignore_unknown_fields = true });
+
+    return .{
+        .value = parsed.value,
+        .json_buf = response_buf,
+        .parsed = parsed,
+    };
+}
+
+pub fn getFile(self: *Client, name: []const u8) !ParsedResponse(types.File) {
+    if (self.api_key.len == 0) return error.MissingApiKey;
+    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/{s}", .{ self.base_url, self.api_version, name });
+    defer self.allocator.free(url);
+    return self.fetchGet(url, types.File);
+}
+
+pub fn listFiles(self: *Client) !ParsedResponse(types.ListFilesResponse) {
+    if (self.api_key.len == 0) return error.MissingApiKey;
+    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/files", .{ self.base_url, self.api_version });
+    defer self.allocator.free(url);
+    return self.fetchGet(url, types.ListFilesResponse);
+}
+
+pub fn deleteFile(self: *Client, name: []const u8) !void {
+    if (self.api_key.len == 0) return error.MissingApiKey;
+    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/{s}", .{ self.base_url, self.api_version, name });
+    defer self.allocator.free(url);
+
+    const result = try self.http_client.fetch(.{
+        .location = .{ .url = url },
+        .method = .DELETE,
+        .extra_headers = &.{
+            .{ .name = "x-goog-api-key", .value = self.api_key },
+        },
+    });
+
+    const status_code = @intFromEnum(result.status);
+    if (status_code < 200 or status_code >= 300) {
+        return error.ApiError;
+    }
+}
+
 test "Client init and deinit" {
     var client = Client.init(std.testing.allocator, "test-key", .{});
     defer client.deinit();

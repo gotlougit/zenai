@@ -401,6 +401,47 @@ pub const EmbedContentResponse = struct {
     embedding: ?ContentEmbedding = null,
 };
 
+// --- Files ---
+
+pub const FileState = enum {
+    STATE_UNSPECIFIED,
+    PROCESSING,
+    ACTIVE,
+    FAILED,
+};
+
+pub const File = struct {
+    name: ?[]const u8 = null,
+    displayName: ?[]const u8 = null,
+    mimeType: ?[]const u8 = null,
+    sizeBytes: ?[]const u8 = null,
+    createTime: ?[]const u8 = null,
+    updateTime: ?[]const u8 = null,
+    expirationTime: ?[]const u8 = null,
+    sha256Hash: ?[]const u8 = null,
+    uri: ?[]const u8 = null,
+    state: ?FileState = null,
+};
+
+pub const UploadFileRequest = struct {
+    file: ?UploadFileMetadata = null,
+};
+
+pub const UploadFileMetadata = struct {
+    name: ?[]const u8 = null,
+    displayName: ?[]const u8 = null,
+    mimeType: ?[]const u8 = null,
+};
+
+pub const UploadFileResponse = struct {
+    file: ?File = null,
+};
+
+pub const ListFilesResponse = struct {
+    files: ?[]const File = null,
+    nextPageToken: ?[]const u8 = null,
+};
+
 // --- Tests ---
 
 test "GenerateContentRequest serializes to JSON" {

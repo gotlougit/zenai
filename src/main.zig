@@ -48,6 +48,26 @@ pub fn main() !void {
         }
     }
 
+    // --- File upload ---
+    std.debug.print("=== File upload ===\n", .{});
+    {
+        const text_data = "This is a test file for the Gemini API. It contains some sample text.";
+        var result = try client.uploadFile(text_data, .{
+            .displayName = "test.txt",
+            .mimeType = "text/plain",
+        });
+        defer result.deinit();
+
+        if (result.value.file) |file| {
+            std.debug.print("Uploaded: {s}\n", .{file.name orelse "?"});
+            std.debug.print("State: {s}\n", .{if (file.state) |s| @tagName(s) else "?"});
+            std.debug.print("URI: {s}\n\n", .{file.uri orelse "?"});
+
+            // Clean up — delete the test file
+            client.deleteFile(file.name orelse "") catch {};
+        }
+    }
+
     // --- Simple text generation ---
     std.debug.print("=== Simple text generation ===\n", .{});
     {
