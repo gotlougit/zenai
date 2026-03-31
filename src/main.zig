@@ -89,7 +89,7 @@ pub fn main() !void {
         );
         defer response.deinit();
 
-        if (response.text()) |text| {
+        if (response.value.text()) |text| {
             std.debug.print("{s}\n\n", .{text});
         }
     }
@@ -172,8 +172,8 @@ fn functionCallingExample(client: *zenai.Client) !void {
     defer response1.deinit();
 
     // Step 2: Check if the model wants to call a function
-    const fc = response1.firstFunctionCall() orelse {
-        std.debug.print("Model responded with text: {s}\n", .{response1.text() orelse "no text"});
+    const fc = response1.value.firstFunctionCall() orelse {
+        std.debug.print("Model responded with text: {s}\n", .{response1.value.text() orelse "no text"});
         return;
     };
 
@@ -217,7 +217,7 @@ fn functionCallingExample(client: *zenai.Client) !void {
     defer response2.deinit();
 
     // Step 5: Print the final response
-    if (response2.text()) |text| {
+    if (response2.value.text()) |text| {
         std.debug.print("Model: {s}\n", .{text});
     }
 }

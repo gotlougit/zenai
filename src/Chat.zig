@@ -13,10 +13,8 @@ client: *Client,
 model: []const u8,
 config: ?GenerationConfig,
 options: Client.RequestOptions,
-/// Owns the Content structs (role strings, parts arrays).
 history: std.ArrayListUnmanaged(Content),
-/// Owns the response objects whose parts are referenced by history.
-responses: std.ArrayListUnmanaged(Client.Response),
+responses: std.ArrayListUnmanaged(Client.Response(GenerateContentResponse)),
 allocator: std.mem.Allocator,
 
 pub fn init(
@@ -37,7 +35,6 @@ pub fn init(
 }
 
 pub fn deinit(self: *Chat) void {
-    // Free user messages (we duped them)
     for (self.history.items) |entry| {
         if (std.mem.eql(u8, entry.role orelse "", "user")) {
             self.allocator.free(entry.parts);
@@ -45,26 +42,29 @@ pub fn deinit(self: *Chat) void {
     }
     self.history.deinit(self.allocator);
 
-    // Free response objects (owns model messages' backing memory)
     for (self.responses.items) |*resp| {
         resp.deinit();
     }
     self.responses.deinit(self.allocator);
 }
 
-pub fn sendMessage(self: *Chat, prompt: []const u8) Client.GenerateContentError!GenerateContentResponse {
+pub fn sendMessage(self: *Chat, prompt: []const u8) Client.ApiError!GenerateContentResponse {
     const parts = try self.allocator.alloc(Part, 1);
     parts[0] = .{ .text = prompt };
     const user_content = Content{ .role = "user", .parts = parts };
     try self.history.append(self.allocator, user_content);
 
-    // Send with full history
-    const response = try self.client.generateContent(
+    const response = self.client.generateContent(
         self.model,
         self.history.items,
         self.config,
         self.options,
-    );
+    ) catch |err| {
+        // Roll back the user message to keep history valid
+        _ = self.history.pop();
+        self.allocator.free(parts);
+        return err;
+    };
 
     // Append model response to history
     if (response.value.candidates) |candidates| {
@@ -75,9 +75,7 @@ pub fn sendMessage(self: *Chat, prompt: []const u8) Client.GenerateContentError!
         }
     }
 
-    // Keep response alive (it owns the model content's memory)
     try self.responses.append(self.allocator, response);
-
     return response.value;
 }
 

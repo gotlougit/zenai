@@ -37,12 +37,6 @@ pub fn deinit(self: *Client) void {
     self.http_client.deinit();
 }
 
-pub const GenerateContentError = error{
-    ApiError,
-    MissingApiKey,
-    EmptyResponse,
-} || std.http.Client.FetchError || std.json.ParseError(std.json.Scanner) || std.mem.Allocator.Error || std.Uri.ParseError;
-
 pub const RequestOptions = struct {
     systemInstruction: ?Content = null,
     safetySettings: ?[]const SafetySetting = null,
@@ -52,241 +46,7 @@ pub const RequestOptions = struct {
 
 /// Owns the parsed response and its backing memory.
 /// Call `deinit()` when done to free all resources.
-pub const Response = struct {
-    value: GenerateContentResponse,
-    /// Owns the JSON bytes backing the parsed response.
-    json_buf: std.Io.Writer.Allocating,
-    /// Owns the parsed JSON arena (strings, slices, etc. point into json_buf).
-    parsed: std.json.Parsed(GenerateContentResponse),
-
-    pub fn deinit(self: *Response) void {
-        self.parsed.deinit();
-        self.json_buf.deinit();
-    }
-
-    pub fn text(self: Response) ?[]const u8 {
-        return self.value.text();
-    }
-
-    pub fn firstFunctionCall(self: Response) ?types.FunctionCall {
-        return self.value.firstFunctionCall();
-    }
-};
-
-pub fn generateContent(
-    self: *Client,
-    model: []const u8,
-    contents: []const Content,
-    config: ?GenerationConfig,
-    options: RequestOptions,
-) GenerateContentError!Response {
-    if (self.api_key.len == 0) return error.MissingApiKey;
-
-    // Build URL
-    const url = try std.fmt.allocPrint(
-        self.allocator,
-        "{s}/{s}/models/{s}:generateContent",
-        .{ self.base_url, self.api_version, model },
-    );
-    defer self.allocator.free(url);
-
-    // Build request body
-    const req_body = GenerateContentRequest{
-        .contents = contents,
-        .generationConfig = config,
-        .systemInstruction = options.systemInstruction,
-        .safetySettings = options.safetySettings,
-        .tools = options.tools,
-        .toolConfig = options.toolConfig,
-    };
-    var payload_buf: std.Io.Writer.Allocating = .init(self.allocator);
-    defer payload_buf.deinit();
-    std.json.Stringify.value(req_body, .{ .emit_null_optional_fields = false }, &payload_buf.writer) catch
-        return error.OutOfMemory;
-    const payload = payload_buf.written();
-
-    // Prepare response writer — ownership transfers to Response
-    var response_buf: std.Io.Writer.Allocating = .init(self.allocator);
-    errdefer response_buf.deinit();
-
-    // Make HTTP request
-    const result = try self.http_client.fetch(.{
-        .location = .{ .url = url },
-        .method = .POST,
-        .payload = payload,
-        .extra_headers = &.{
-            .{ .name = "x-goog-api-key", .value = self.api_key },
-        },
-        .headers = .{
-            .content_type = .{ .override = "application/json" },
-        },
-        .response_writer = &response_buf.writer,
-    });
-
-    const response_body = response_buf.written();
-
-    // Check HTTP status
-    const status_code = @intFromEnum(result.status);
-    if (status_code < 200 or status_code >= 300) {
-        if (response_body.len > 0) {
-            std.log.err("Gemini API error (HTTP {d}): {s}", .{ status_code, response_body });
-        }
-        return error.ApiError;
-    }
-
-    if (response_body.len == 0) return error.EmptyResponse;
-
-    // Parse response — ownership transfers to Response
-    const parsed = try std.json.parseFromSlice(
-        GenerateContentResponse,
-        self.allocator,
-        response_body,
-        .{ .ignore_unknown_fields = true },
-    );
-
-    return .{
-        .value = parsed.value,
-        .json_buf = response_buf,
-        .parsed = parsed,
-    };
-}
-
-pub fn generateContentFromText(
-    self: *Client,
-    model: []const u8,
-    prompt: []const u8,
-    config: ?GenerationConfig,
-    options: RequestOptions,
-) GenerateContentError!Response {
-    const parts = [_]Part{.{ .text = prompt }};
-    const contents = [_]Content{.{ .role = "user", .parts = &parts }};
-    return self.generateContent(model, &contents, config, options);
-}
-
-pub const StreamError = error{
-    ApiError,
-    MissingApiKey,
-    InvalidSseData,
-} || std.http.Client.RequestError || std.http.Client.Request.ReceiveHeadError || std.Io.Writer.Error || std.Io.Reader.DelimiterError || std.json.ParseError(std.json.Scanner) || std.mem.Allocator.Error || std.Uri.ParseError;
-
-pub fn generateContentStream(
-    self: *Client,
-    model: []const u8,
-    contents: []const Content,
-    config: ?GenerationConfig,
-    options: RequestOptions,
-    callback: *const fn (GenerateContentResponse) void,
-) StreamError!void {
-    if (self.api_key.len == 0) return error.MissingApiKey;
-
-    // Build URL with streaming endpoint
-    const url = try std.fmt.allocPrint(
-        self.allocator,
-        "{s}/{s}/models/{s}:streamGenerateContent?alt=sse",
-        .{ self.base_url, self.api_version, model },
-    );
-    defer self.allocator.free(url);
-
-    // Build request body
-    const req_body = GenerateContentRequest{
-        .contents = contents,
-        .generationConfig = config,
-        .systemInstruction = options.systemInstruction,
-        .safetySettings = options.safetySettings,
-        .tools = options.tools,
-        .toolConfig = options.toolConfig,
-    };
-    var payload_buf: std.Io.Writer.Allocating = .init(self.allocator);
-    defer payload_buf.deinit();
-    std.json.Stringify.value(req_body, .{ .emit_null_optional_fields = false }, &payload_buf.writer) catch
-        return error.OutOfMemory;
-    const payload = payload_buf.written();
-
-    // Create low-level request
-    const uri = try std.Uri.parse(url);
-    var req = try self.http_client.request(.POST, uri, .{
-        .extra_headers = &.{
-            .{ .name = "x-goog-api-key", .value = self.api_key },
-        },
-        .headers = .{
-            .content_type = .{ .override = "application/json" },
-        },
-        .redirect_behavior = .unhandled,
-    });
-    defer req.deinit();
-
-    // Send body
-    req.transfer_encoding = .{ .content_length = payload.len };
-    var bw = try req.sendBodyUnflushed(&.{});
-    try bw.writer.writeAll(payload);
-    try bw.end();
-    try req.connection.?.flush();
-
-    // Receive response headers
-    var redirect_buf: [0]u8 = undefined;
-    var response = try req.receiveHead(&redirect_buf);
-
-    // Check HTTP status
-    const status_code = @intFromEnum(response.head.status);
-    if (status_code < 200 or status_code >= 300) {
-        std.log.err("Gemini API streaming error (HTTP {d})", .{status_code});
-        return error.ApiError;
-    }
-
-    // Read SSE lines — buffer must be large enough to hold a full SSE data line
-    const transfer_buf = try self.allocator.alloc(u8, 256 * 1024);
-    defer self.allocator.free(transfer_buf);
-    const reader = response.reader(transfer_buf);
-
-    while (true) {
-        const line = reader.takeDelimiter('\n') catch |err| switch (err) {
-            error.StreamTooLong => return error.InvalidSseData,
-            error.ReadFailed => return, // connection closed
-        } orelse return; // end of stream
-
-        // Skip empty lines and carriage returns
-        const trimmed = std.mem.trimRight(u8, line, "\r");
-        if (trimmed.len == 0) continue;
-
-        // Parse SSE data lines
-        if (std.mem.startsWith(u8, trimmed, "data: ")) {
-            const json_data = trimmed["data: ".len..];
-
-            const parsed = std.json.parseFromSlice(
-                GenerateContentResponse,
-                self.allocator,
-                json_data,
-                .{ .ignore_unknown_fields = true },
-            ) catch continue; // skip malformed chunks
-            defer parsed.deinit();
-
-            callback(parsed.value);
-        }
-    }
-}
-
-pub fn generateContentStreamFromText(
-    self: *Client,
-    model: []const u8,
-    prompt: []const u8,
-    config: ?GenerationConfig,
-    options: RequestOptions,
-    callback: *const fn (GenerateContentResponse) void,
-) StreamError!void {
-    const parts = [_]Part{.{ .text = prompt }};
-    const contents = [_]Content{.{ .role = "user", .parts = &parts }};
-    return self.generateContentStream(model, &contents, config, options, callback);
-}
-
-// --- Model Management ---
-
-pub const GetError = error{
-    ApiError,
-    MissingApiKey,
-    EmptyResponse,
-} || std.http.Client.FetchError || std.mem.Allocator.Error || std.Uri.ParseError;
-
-pub fn ParsedResponse(comptime T: type) type {
+pub fn Response(comptime T: type) type {
     return struct {
         value: T,
         json_buf: std.Io.Writer.Allocating,
@@ -299,7 +59,15 @@ pub fn ParsedResponse(comptime T: type) type {
     };
 }
 
-fn fetchGet(self: *Client, url: []const u8, comptime T: type) (GetError || std.json.ParseError(std.json.Scanner))!ParsedResponse(T) {
+pub const ApiError = error{
+    ApiError,
+    MissingApiKey,
+    EmptyResponse,
+} || std.http.Client.FetchError || std.json.ParseError(std.json.Scanner) || std.mem.Allocator.Error || std.Uri.ParseError;
+
+// --- Internal helpers ---
+
+fn fetchGet(self: *Client, url: []const u8, comptime T: type) ApiError!Response(T) {
     var response_buf: std.Io.Writer.Allocating = .init(self.allocator);
     errdefer response_buf.deinit();
 
@@ -314,24 +82,16 @@ fn fetchGet(self: *Client, url: []const u8, comptime T: type) (GetError || std.j
     const body = response_buf.written();
     const status_code = @intFromEnum(result.status);
     if (status_code < 200 or status_code >= 300) {
-        if (body.len > 0) {
-            std.log.err("Gemini API error (HTTP {d}): {s}", .{ status_code, body });
-        }
+        if (body.len > 0) std.log.err("Gemini API error (HTTP {d}): {s}", .{ status_code, body });
         return error.ApiError;
     }
-
     if (body.len == 0) return error.EmptyResponse;
 
     const parsed = try std.json.parseFromSlice(T, self.allocator, body, .{ .ignore_unknown_fields = true });
-
-    return .{
-        .value = parsed.value,
-        .json_buf = response_buf,
-        .parsed = parsed,
-    };
+    return .{ .value = parsed.value, .json_buf = response_buf, .parsed = parsed };
 }
 
-fn fetchPost(self: *Client, url: []const u8, body: anytype, comptime T: type) (GetError || std.json.ParseError(std.json.Scanner))!ParsedResponse(T) {
+fn fetchPost(self: *Client, url: []const u8, body: anytype, comptime T: type) ApiError!Response(T) {
     var payload_buf: std.Io.Writer.Allocating = .init(self.allocator);
     defer payload_buf.deinit();
     std.json.Stringify.value(body, .{ .emit_null_optional_fields = false }, &payload_buf.writer) catch
@@ -357,21 +117,13 @@ fn fetchPost(self: *Client, url: []const u8, body: anytype, comptime T: type) (G
     const resp_body = response_buf.written();
     const status_code = @intFromEnum(result.status);
     if (status_code < 200 or status_code >= 300) {
-        if (resp_body.len > 0) {
-            std.log.err("Gemini API error (HTTP {d}): {s}", .{ status_code, resp_body });
-        }
+        if (resp_body.len > 0) std.log.err("Gemini API error (HTTP {d}): {s}", .{ status_code, resp_body });
         return error.ApiError;
     }
-
     if (resp_body.len == 0) return error.EmptyResponse;
 
     const parsed = try std.json.parseFromSlice(T, self.allocator, resp_body, .{ .ignore_unknown_fields = true });
-
-    return .{
-        .value = parsed.value,
-        .json_buf = response_buf,
-        .parsed = parsed,
-    };
+    return .{ .value = parsed.value, .json_buf = response_buf, .parsed = parsed };
 }
 
 pub const ListOptions = struct {
@@ -392,14 +144,148 @@ fn appendListParams(allocator: std.mem.Allocator, base_url: []const u8, options:
     return std.fmt.allocPrint(allocator, "{s}?pageToken={s}", .{ base_url, options.pageToken.? });
 }
 
-pub fn getModel(self: *Client, model: []const u8) !ParsedResponse(types.Model) {
+// --- Generate Content ---
+
+pub fn generateContent(
+    self: *Client,
+    model: []const u8,
+    contents: []const Content,
+    config: ?GenerationConfig,
+    options: RequestOptions,
+) ApiError!Response(GenerateContentResponse) {
+    if (self.api_key.len == 0) return error.MissingApiKey;
+    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/models/{s}:generateContent", .{ self.base_url, self.api_version, model });
+    defer self.allocator.free(url);
+
+    return self.fetchPost(url, GenerateContentRequest{
+        .contents = contents,
+        .generationConfig = config,
+        .systemInstruction = options.systemInstruction,
+        .safetySettings = options.safetySettings,
+        .tools = options.tools,
+        .toolConfig = options.toolConfig,
+    }, GenerateContentResponse);
+}
+
+pub fn generateContentFromText(
+    self: *Client,
+    model: []const u8,
+    prompt: []const u8,
+    config: ?GenerationConfig,
+    options: RequestOptions,
+) ApiError!Response(GenerateContentResponse) {
+    const parts = [_]Part{.{ .text = prompt }};
+    const contents = [_]Content{.{ .role = "user", .parts = &parts }};
+    return self.generateContent(model, &contents, config, options);
+}
+
+// --- Streaming ---
+
+pub const StreamError = error{
+    ApiError,
+    MissingApiKey,
+    InvalidSseData,
+} || std.http.Client.RequestError || std.http.Client.Request.ReceiveHeadError || std.Io.Writer.Error || std.Io.Reader.DelimiterError || std.json.ParseError(std.json.Scanner) || std.mem.Allocator.Error || std.Uri.ParseError;
+
+pub fn generateContentStream(
+    self: *Client,
+    model: []const u8,
+    contents: []const Content,
+    config: ?GenerationConfig,
+    options: RequestOptions,
+    callback: *const fn (GenerateContentResponse) void,
+) StreamError!void {
+    if (self.api_key.len == 0) return error.MissingApiKey;
+
+    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/models/{s}:streamGenerateContent?alt=sse", .{ self.base_url, self.api_version, model });
+    defer self.allocator.free(url);
+
+    const req_body = GenerateContentRequest{
+        .contents = contents,
+        .generationConfig = config,
+        .systemInstruction = options.systemInstruction,
+        .safetySettings = options.safetySettings,
+        .tools = options.tools,
+        .toolConfig = options.toolConfig,
+    };
+    var payload_buf: std.Io.Writer.Allocating = .init(self.allocator);
+    defer payload_buf.deinit();
+    std.json.Stringify.value(req_body, .{ .emit_null_optional_fields = false }, &payload_buf.writer) catch
+        return error.OutOfMemory;
+    const payload = payload_buf.written();
+
+    const uri = try std.Uri.parse(url);
+    var req = try self.http_client.request(.POST, uri, .{
+        .extra_headers = &.{
+            .{ .name = "x-goog-api-key", .value = self.api_key },
+        },
+        .headers = .{
+            .content_type = .{ .override = "application/json" },
+        },
+        .redirect_behavior = .unhandled,
+    });
+    defer req.deinit();
+
+    req.transfer_encoding = .{ .content_length = payload.len };
+    var bw = try req.sendBodyUnflushed(&.{});
+    try bw.writer.writeAll(payload);
+    try bw.end();
+    try req.connection.?.flush();
+
+    var redirect_buf: [0]u8 = undefined;
+    var response = try req.receiveHead(&redirect_buf);
+
+    const status_code = @intFromEnum(response.head.status);
+    if (status_code < 200 or status_code >= 300) {
+        std.log.err("Gemini API streaming error (HTTP {d})", .{status_code});
+        return error.ApiError;
+    }
+
+    const transfer_buf = try self.allocator.alloc(u8, 256 * 1024);
+    defer self.allocator.free(transfer_buf);
+    const reader = response.reader(transfer_buf);
+
+    while (true) {
+        const line = reader.takeDelimiter('\n') catch |err| switch (err) {
+            error.StreamTooLong => return error.InvalidSseData,
+            error.ReadFailed => return,
+        } orelse return;
+
+        const trimmed = std.mem.trimRight(u8, line, "\r");
+        if (trimmed.len == 0) continue;
+
+        if (std.mem.startsWith(u8, trimmed, "data: ")) {
+            const json_data = trimmed["data: ".len..];
+            const parsed = std.json.parseFromSlice(GenerateContentResponse, self.allocator, json_data, .{ .ignore_unknown_fields = true }) catch continue;
+            defer parsed.deinit();
+            callback(parsed.value);
+        }
+    }
+}
+
+pub fn generateContentStreamFromText(
+    self: *Client,
+    model: []const u8,
+    prompt: []const u8,
+    config: ?GenerationConfig,
+    options: RequestOptions,
+    callback: *const fn (GenerateContentResponse) void,
+) StreamError!void {
+    const parts = [_]Part{.{ .text = prompt }};
+    const contents = [_]Content{.{ .role = "user", .parts = &parts }};
+    return self.generateContentStream(model, &contents, config, options, callback);
+}
+
+// --- Model Management ---
+
+pub fn getModel(self: *Client, model: []const u8) !Response(types.Model) {
     if (self.api_key.len == 0) return error.MissingApiKey;
     const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/models/{s}", .{ self.base_url, self.api_version, model });
     defer self.allocator.free(url);
     return self.fetchGet(url, types.Model);
 }
 
-pub fn listModels(self: *Client, options: ListOptions) !ParsedResponse(types.ListModelsResponse) {
+pub fn listModels(self: *Client, options: ListOptions) !Response(types.ListModelsResponse) {
     if (self.api_key.len == 0) return error.MissingApiKey;
     const base = try std.fmt.allocPrint(self.allocator, "{s}/{s}/models", .{ self.base_url, self.api_version });
     defer self.allocator.free(base);
@@ -415,7 +301,7 @@ pub fn countTokens(
     model: []const u8,
     contents: []const Content,
     options: RequestOptions,
-) !ParsedResponse(types.CountTokensResponse) {
+) !Response(types.CountTokensResponse) {
     if (self.api_key.len == 0) return error.MissingApiKey;
     const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/models/{s}:countTokens", .{ self.base_url, self.api_version, model });
     defer self.allocator.free(url);
@@ -430,7 +316,7 @@ pub fn countTokensFromText(
     self: *Client,
     model: []const u8,
     prompt: []const u8,
-) !ParsedResponse(types.CountTokensResponse) {
+) !Response(types.CountTokensResponse) {
     const parts = [_]Part{.{ .text = prompt }};
     const contents = [_]Content{.{ .role = "user", .parts = &parts }};
     return self.countTokens(model, &contents, .{});
@@ -449,11 +335,10 @@ pub fn embedContent(
     model: []const u8,
     content: Content,
     config: EmbedConfig,
-) !ParsedResponse(types.EmbedContentResponse) {
+) !Response(types.EmbedContentResponse) {
     if (self.api_key.len == 0) return error.MissingApiKey;
     const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/models/{s}:embedContent", .{ self.base_url, self.api_version, model });
     defer self.allocator.free(url);
-
     return self.fetchPost(url, types.EmbedContentRequest{
         .content = content,
         .taskType = config.taskType,
@@ -466,7 +351,7 @@ pub fn embedText(
     self: *Client,
     model: []const u8,
     text: []const u8,
-) !ParsedResponse(types.EmbedContentResponse) {
+) !Response(types.EmbedContentResponse) {
     const parts = [_]Part{.{ .text = text }};
     const content = Content{ .parts = &parts };
     return self.embedContent(model, content, .{});
@@ -484,14 +369,13 @@ pub fn uploadFile(
     self: *Client,
     data: []const u8,
     config: UploadFileConfig,
-) !ParsedResponse(types.UploadFileResponse) {
+) !Response(types.UploadFileResponse) {
     if (self.api_key.len == 0) return error.MissingApiKey;
 
     // Stage 1: Initialize resumable upload
     const create_url = try std.fmt.allocPrint(self.allocator, "{s}/upload/{s}/files", .{ self.base_url, self.api_version });
     defer self.allocator.free(create_url);
 
-    // Build metadata JSON
     var metadata_buf: std.Io.Writer.Allocating = .init(self.allocator);
     defer metadata_buf.deinit();
     std.json.Stringify.value(types.UploadFileRequest{
@@ -506,7 +390,6 @@ pub fn uploadFile(
 
     const mime_type = config.mimeType orelse "application/octet-stream";
 
-    // Make the initialization request
     const uri = try std.Uri.parse(create_url);
     var req = try self.http_client.request(.POST, uri, .{
         .extra_headers = &.{
@@ -537,7 +420,7 @@ pub fn uploadFile(
         return error.ApiError;
     }
 
-    // Find X-Goog-Upload-Url in response headers (before reader() invalidates strings)
+    // Extract upload URL before reader() invalidates header strings
     const upload_url = blk: {
         var it = init_response.head.iterateHeaders();
         while (it.next()) |header| {
@@ -549,7 +432,6 @@ pub fn uploadFile(
     };
     defer self.allocator.free(upload_url);
 
-    // Consume the init response body
     var transfer_buf: [256]u8 = undefined;
     const init_reader = init_response.reader(&transfer_buf);
     _ = init_reader.discardRemaining() catch {};
@@ -584,7 +466,6 @@ pub fn uploadFile(
         return error.ApiError;
     }
 
-    // Read and parse response body
     var response_buf: std.Io.Writer.Allocating = .init(self.allocator);
     errdefer response_buf.deinit();
 
@@ -596,22 +477,17 @@ pub fn uploadFile(
     if (body.len == 0) return error.EmptyResponse;
 
     const parsed = try std.json.parseFromSlice(types.UploadFileResponse, self.allocator, body, .{ .ignore_unknown_fields = true });
-
-    return .{
-        .value = parsed.value,
-        .json_buf = response_buf,
-        .parsed = parsed,
-    };
+    return .{ .value = parsed.value, .json_buf = response_buf, .parsed = parsed };
 }
 
-pub fn getFile(self: *Client, name: []const u8) !ParsedResponse(types.File) {
+pub fn getFile(self: *Client, name: []const u8) !Response(types.File) {
     if (self.api_key.len == 0) return error.MissingApiKey;
     const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/{s}", .{ self.base_url, self.api_version, name });
     defer self.allocator.free(url);
     return self.fetchGet(url, types.File);
 }
 
-pub fn listFiles(self: *Client, options: ListOptions) !ParsedResponse(types.ListFilesResponse) {
+pub fn listFiles(self: *Client, options: ListOptions) !Response(types.ListFilesResponse) {
     if (self.api_key.len == 0) return error.MissingApiKey;
     const base = try std.fmt.allocPrint(self.allocator, "{s}/{s}/files", .{ self.base_url, self.api_version });
     defer self.allocator.free(base);
@@ -623,7 +499,6 @@ pub fn listFiles(self: *Client, options: ListOptions) !ParsedResponse(types.List
 pub fn downloadFile(self: *Client, uri: []const u8) ![]u8 {
     if (self.api_key.len == 0) return error.MissingApiKey;
 
-    // Append API key as query parameter
     const sep: []const u8 = if (std.mem.indexOf(u8, uri, "?") != null) "&" else "?";
     const url = try std.fmt.allocPrint(self.allocator, "{s}{s}key={s}", .{ uri, sep, self.api_key });
     defer self.allocator.free(url);
@@ -659,9 +534,7 @@ pub fn deleteFile(self: *Client, name: []const u8) !void {
     });
 
     const status_code = @intFromEnum(result.status);
-    if (status_code < 200 or status_code >= 300) {
-        return error.ApiError;
-    }
+    if (status_code < 200 or status_code >= 300) return error.ApiError;
 }
 
 // --- Cached Content ---
@@ -672,9 +545,7 @@ pub const CreateCachedContentConfig = struct {
     tools: ?[]const Tool = null,
     toolConfig: ?ToolConfig = null,
     displayName: ?[]const u8 = null,
-    /// Duration string, e.g. "3600s" for 1 hour.
     ttl: ?[]const u8 = null,
-    /// RFC 3339 timestamp, e.g. "2026-04-01T00:00:00Z".
     expireTime: ?[]const u8 = null,
 };
 
@@ -682,7 +553,7 @@ pub fn createCachedContent(
     self: *Client,
     model: []const u8,
     config: CreateCachedContentConfig,
-) !ParsedResponse(types.CachedContent) {
+) !Response(types.CachedContent) {
     if (self.api_key.len == 0) return error.MissingApiKey;
     const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/cachedContents", .{ self.base_url, self.api_version });
     defer self.allocator.free(url);
@@ -702,14 +573,14 @@ pub fn createCachedContent(
     }, types.CachedContent);
 }
 
-pub fn getCachedContent(self: *Client, name: []const u8) !ParsedResponse(types.CachedContent) {
+pub fn getCachedContent(self: *Client, name: []const u8) !Response(types.CachedContent) {
     if (self.api_key.len == 0) return error.MissingApiKey;
     const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/{s}", .{ self.base_url, self.api_version, name });
     defer self.allocator.free(url);
     return self.fetchGet(url, types.CachedContent);
 }
 
-pub fn listCachedContents(self: *Client, options: ListOptions) !ParsedResponse(types.ListCachedContentsResponse) {
+pub fn listCachedContents(self: *Client, options: ListOptions) !Response(types.ListCachedContentsResponse) {
     if (self.api_key.len == 0) return error.MissingApiKey;
     const base = try std.fmt.allocPrint(self.allocator, "{s}/{s}/cachedContents", .{ self.base_url, self.api_version });
     defer self.allocator.free(base);
@@ -722,12 +593,11 @@ pub fn updateCachedContent(
     self: *Client,
     name: []const u8,
     config: struct { ttl: ?[]const u8 = null, expireTime: ?[]const u8 = null },
-) !ParsedResponse(types.CachedContent) {
+) !Response(types.CachedContent) {
     if (self.api_key.len == 0) return error.MissingApiKey;
     const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/{s}", .{ self.base_url, self.api_version, name });
     defer self.allocator.free(url);
 
-    // PATCH request
     var payload_buf: std.Io.Writer.Allocating = .init(self.allocator);
     defer payload_buf.deinit();
     std.json.Stringify.value(types.UpdateCachedContentRequest{
