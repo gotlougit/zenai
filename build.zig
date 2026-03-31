@@ -9,6 +9,20 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
+    // Documentation generation
+    const lib = b.addLibrary(.{
+        .name = "zenai",
+        .linkage = .static,
+        .root_module = mod,
+    });
+    const docs_step = b.step("docs", "Generate documentation");
+    const docs_install = b.addInstallDirectory(.{
+        .source_dir = lib.getEmittedDocs(),
+        .install_dir = .prefix,
+        .install_subdir = "docs",
+    });
+    docs_step.dependOn(&docs_install.step);
+
     const exe = b.addExecutable(.{
         .name = "zenai",
         .root_module = b.createModule(.{
