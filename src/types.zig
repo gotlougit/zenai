@@ -384,6 +384,23 @@ pub const CountTokensResponse = struct {
     cachedContentTokenCount: ?i32 = null,
 };
 
+// --- Embeddings ---
+
+pub const EmbedContentRequest = struct {
+    content: ?Content = null,
+    taskType: ?[]const u8 = null,
+    title: ?[]const u8 = null,
+    outputDimensionality: ?i32 = null,
+};
+
+pub const ContentEmbedding = struct {
+    values: ?[]const f32 = null,
+};
+
+pub const EmbedContentResponse = struct {
+    embedding: ?ContentEmbedding = null,
+};
+
 // --- Tests ---
 
 test "GenerateContentRequest serializes to JSON" {

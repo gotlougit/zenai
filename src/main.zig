@@ -34,6 +34,20 @@ pub fn main() !void {
         std.debug.print("Tokens: {d}\n\n", .{result.value.totalTokens orelse 0});
     }
 
+    // --- Embeddings ---
+    std.debug.print("=== Embeddings ===\n", .{});
+    {
+        var result = try client.embedText("gemini-embedding-001", "What is the meaning of life?");
+        defer result.deinit();
+        if (result.value.embedding) |embedding| {
+            if (embedding.values) |values| {
+                std.debug.print("Dimension: {d}, first 3: [{d:.4}, {d:.4}, {d:.4}]\n\n", .{
+                    values.len, values[0], values[1], values[2],
+                });
+            }
+        }
+    }
+
     // --- Simple text generation ---
     std.debug.print("=== Simple text generation ===\n", .{});
     {

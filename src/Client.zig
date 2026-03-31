@@ -416,6 +416,42 @@ pub fn countTokensFromText(
     return self.countTokens(model, &contents, .{});
 }
 
+// --- Embeddings ---
+
+pub const EmbedConfig = struct {
+    taskType: ?[]const u8 = null,
+    title: ?[]const u8 = null,
+    outputDimensionality: ?i32 = null,
+};
+
+pub fn embedContent(
+    self: *Client,
+    model: []const u8,
+    content: Content,
+    config: EmbedConfig,
+) !ParsedResponse(types.EmbedContentResponse) {
+    if (self.api_key.len == 0) return error.MissingApiKey;
+    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/models/{s}:embedContent", .{ self.base_url, self.api_version, model });
+    defer self.allocator.free(url);
+
+    return self.fetchPost(url, types.EmbedContentRequest{
+        .content = content,
+        .taskType = config.taskType,
+        .title = config.title,
+        .outputDimensionality = config.outputDimensionality,
+    }, types.EmbedContentResponse);
+}
+
+pub fn embedText(
+    self: *Client,
+    model: []const u8,
+    text: []const u8,
+) !ParsedResponse(types.EmbedContentResponse) {
+    const parts = [_]Part{.{ .text = text }};
+    const content = Content{ .parts = &parts };
+    return self.embedContent(model, content, .{});
+}
+
 test "Client init and deinit" {
     var client = Client.init(std.testing.allocator, "test-key", .{});
     defer client.deinit();
