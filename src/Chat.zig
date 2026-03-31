@@ -37,6 +37,9 @@ pub fn init(
 pub fn deinit(self: *Chat) void {
     for (self.history.items) |entry| {
         if (std.mem.eql(u8, entry.role orelse "", "user")) {
+            for (entry.parts) |part| {
+                if (part.text) |txt| self.allocator.free(txt);
+            }
             self.allocator.free(entry.parts);
         }
     }
@@ -49,24 +52,34 @@ pub fn deinit(self: *Chat) void {
 }
 
 pub fn sendMessage(self: *Chat, prompt: []const u8) Client.ApiError!GenerateContentResponse {
+    const owned_prompt = try self.allocator.dupe(u8, prompt);
     const parts = try self.allocator.alloc(Part, 1);
-    parts[0] = .{ .text = prompt };
+    parts[0] = .{ .text = owned_prompt };
     const user_content = Content{ .role = "user", .parts = parts };
     try self.history.append(self.allocator, user_content);
 
-    const response = self.client.generateContent(
+    var response = self.client.generateContent(
         self.model,
         self.history.items,
         self.config,
         self.options,
     ) catch |err| {
-        // Roll back the user message to keep history valid
         _ = self.history.pop();
+        self.allocator.free(owned_prompt);
         self.allocator.free(parts);
         return err;
     };
 
-    // Append model response to history
+    // If any append below fails, clean up response and roll back history
+    errdefer {
+        response.deinit();
+        _ = self.history.pop();
+        self.allocator.free(owned_prompt);
+        self.allocator.free(parts);
+    }
+
+    try self.responses.append(self.allocator, response);
+
     if (response.value.candidates) |candidates| {
         if (candidates.len > 0) {
             if (candidates[0].content) |content| {
@@ -75,7 +88,6 @@ pub fn sendMessage(self: *Chat, prompt: []const u8) Client.ApiError!GenerateCont
         }
     }
 
-    try self.responses.append(self.allocator, response);
     return response.value;
 }
 
