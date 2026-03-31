@@ -617,6 +617,122 @@ pub fn deleteFile(self: *Client, name: []const u8) !void {
     }
 }
 
+// --- Cached Content ---
+
+pub const CreateCachedContentConfig = struct {
+    contents: ?[]const Content = null,
+    systemInstruction: ?Content = null,
+    tools: ?[]const Tool = null,
+    toolConfig: ?ToolConfig = null,
+    displayName: ?[]const u8 = null,
+    /// Duration string, e.g. "3600s" for 1 hour.
+    ttl: ?[]const u8 = null,
+    /// RFC 3339 timestamp, e.g. "2026-04-01T00:00:00Z".
+    expireTime: ?[]const u8 = null,
+};
+
+pub fn createCachedContent(
+    self: *Client,
+    model: []const u8,
+    config: CreateCachedContentConfig,
+) !ParsedResponse(types.CachedContent) {
+    if (self.api_key.len == 0) return error.MissingApiKey;
+    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/cachedContents", .{ self.base_url, self.api_version });
+    defer self.allocator.free(url);
+
+    const full_model = try std.fmt.allocPrint(self.allocator, "models/{s}", .{model});
+    defer self.allocator.free(full_model);
+
+    return self.fetchPost(url, types.CreateCachedContentRequest{
+        .model = full_model,
+        .contents = config.contents,
+        .systemInstruction = config.systemInstruction,
+        .tools = config.tools,
+        .toolConfig = config.toolConfig,
+        .displayName = config.displayName,
+        .ttl = config.ttl,
+        .expireTime = config.expireTime,
+    }, types.CachedContent);
+}
+
+pub fn getCachedContent(self: *Client, name: []const u8) !ParsedResponse(types.CachedContent) {
+    if (self.api_key.len == 0) return error.MissingApiKey;
+    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/{s}", .{ self.base_url, self.api_version, name });
+    defer self.allocator.free(url);
+    return self.fetchGet(url, types.CachedContent);
+}
+
+pub fn listCachedContents(self: *Client) !ParsedResponse(types.ListCachedContentsResponse) {
+    if (self.api_key.len == 0) return error.MissingApiKey;
+    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/cachedContents", .{ self.base_url, self.api_version });
+    defer self.allocator.free(url);
+    return self.fetchGet(url, types.ListCachedContentsResponse);
+}
+
+pub fn updateCachedContent(
+    self: *Client,
+    name: []const u8,
+    config: struct { ttl: ?[]const u8 = null, expireTime: ?[]const u8 = null },
+) !ParsedResponse(types.CachedContent) {
+    if (self.api_key.len == 0) return error.MissingApiKey;
+    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/{s}", .{ self.base_url, self.api_version, name });
+    defer self.allocator.free(url);
+
+    // PATCH request
+    var payload_buf: std.Io.Writer.Allocating = .init(self.allocator);
+    defer payload_buf.deinit();
+    std.json.Stringify.value(types.UpdateCachedContentRequest{
+        .ttl = config.ttl,
+        .expireTime = config.expireTime,
+    }, .{ .emit_null_optional_fields = false }, &payload_buf.writer) catch
+        return error.OutOfMemory;
+    const payload = payload_buf.written();
+
+    var response_buf: std.Io.Writer.Allocating = .init(self.allocator);
+    errdefer response_buf.deinit();
+
+    const result = try self.http_client.fetch(.{
+        .location = .{ .url = url },
+        .method = .PATCH,
+        .payload = payload,
+        .extra_headers = &.{
+            .{ .name = "x-goog-api-key", .value = self.api_key },
+        },
+        .headers = .{
+            .content_type = .{ .override = "application/json" },
+        },
+        .response_writer = &response_buf.writer,
+    });
+
+    const body = response_buf.written();
+    const status_code = @intFromEnum(result.status);
+    if (status_code < 200 or status_code >= 300) {
+        if (body.len > 0) std.log.err("Gemini API error (HTTP {d}): {s}", .{ status_code, body });
+        return error.ApiError;
+    }
+    if (body.len == 0) return error.EmptyResponse;
+
+    const parsed = try std.json.parseFromSlice(types.CachedContent, self.allocator, body, .{ .ignore_unknown_fields = true });
+    return .{ .value = parsed.value, .json_buf = response_buf, .parsed = parsed };
+}
+
+pub fn deleteCachedContent(self: *Client, name: []const u8) !void {
+    if (self.api_key.len == 0) return error.MissingApiKey;
+    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/{s}", .{ self.base_url, self.api_version, name });
+    defer self.allocator.free(url);
+
+    const result = try self.http_client.fetch(.{
+        .location = .{ .url = url },
+        .method = .DELETE,
+        .extra_headers = &.{
+            .{ .name = "x-goog-api-key", .value = self.api_key },
+        },
+    });
+
+    const status_code = @intFromEnum(result.status);
+    if (status_code < 200 or status_code >= 300) return error.ApiError;
+}
+
 test "Client init and deinit" {
     var client = Client.init(std.testing.allocator, "test-key", .{});
     defer client.deinit();

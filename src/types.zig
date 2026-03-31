@@ -442,6 +442,43 @@ pub const ListFilesResponse = struct {
     nextPageToken: ?[]const u8 = null,
 };
 
+// --- Cached Content ---
+
+pub const CachedContentUsageMetadata = struct {
+    totalTokenCount: ?i32 = null,
+};
+
+pub const CachedContent = struct {
+    name: ?[]const u8 = null,
+    displayName: ?[]const u8 = null,
+    model: ?[]const u8 = null,
+    createTime: ?[]const u8 = null,
+    updateTime: ?[]const u8 = null,
+    expireTime: ?[]const u8 = null,
+    usageMetadata: ?CachedContentUsageMetadata = null,
+};
+
+pub const CreateCachedContentRequest = struct {
+    model: ?[]const u8 = null,
+    contents: ?[]const Content = null,
+    systemInstruction: ?Content = null,
+    tools: ?[]const Tool = null,
+    toolConfig: ?ToolConfig = null,
+    displayName: ?[]const u8 = null,
+    ttl: ?[]const u8 = null,
+    expireTime: ?[]const u8 = null,
+};
+
+pub const UpdateCachedContentRequest = struct {
+    ttl: ?[]const u8 = null,
+    expireTime: ?[]const u8 = null,
+};
+
+pub const ListCachedContentsResponse = struct {
+    cachedContents: ?[]const CachedContent = null,
+    nextPageToken: ?[]const u8 = null,
+};
+
 // --- Tests ---
 
 test "GenerateContentRequest serializes to JSON" {
