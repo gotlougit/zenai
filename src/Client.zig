@@ -10,6 +10,8 @@ const SafetySetting = types.SafetySetting;
 const Tool = types.Tool;
 const ToolConfig = types.ToolConfig;
 
+/// Gemini API client. Provides access to content generation, embeddings,
+/// model management, file uploads, token counting, and cached content.
 const Client = @This();
 
 allocator: std.mem.Allocator,
@@ -18,11 +20,16 @@ base_url: []const u8,
 api_version: []const u8,
 http_client: std.http.Client,
 
+/// Options for customizing the API endpoint.
 pub const InitOptions = struct {
+    /// Base URL for the Gemini API.
     base_url: []const u8 = "https://generativelanguage.googleapis.com",
+    /// API version prefix.
     api_version: []const u8 = "v1beta",
 };
 
+/// Create a new Gemini API client.
+/// The `api_key` can be obtained from https://ai.google.dev/gemini-api/docs/api-key
 pub fn init(allocator: std.mem.Allocator, api_key: []const u8, options: InitOptions) Client {
     return .{
         .allocator = allocator,
@@ -33,14 +40,20 @@ pub fn init(allocator: std.mem.Allocator, api_key: []const u8, options: InitOpti
     };
 }
 
+/// Release all resources held by the client, including HTTP connections.
 pub fn deinit(self: *Client) void {
     self.http_client.deinit();
 }
 
+/// Per-request options for system instructions, safety, and tools.
 pub const RequestOptions = struct {
+    /// Instructions to steer the model toward better performance.
     systemInstruction: ?Content = null,
+    /// Safety settings to filter generated content.
     safetySettings: ?[]const SafetySetting = null,
+    /// Tools the model may use (function calling, code execution, search).
     tools: ?[]const Tool = null,
+    /// Configuration for tool usage behavior.
     toolConfig: ?ToolConfig = null,
 };
 
@@ -126,8 +139,11 @@ fn fetchPost(self: *Client, url: []const u8, body: anytype, comptime T: type) Ap
     return .{ .value = parsed.value, .json_buf = response_buf, .parsed = parsed };
 }
 
+/// Pagination options for list operations.
 pub const ListOptions = struct {
+    /// Maximum number of items to return per page.
     pageSize: ?i32 = null,
+    /// Token from a previous response's `nextPageToken` to fetch the next page.
     pageToken: ?[]const u8 = null,
 };
 
@@ -146,6 +162,7 @@ fn appendListParams(allocator: std.mem.Allocator, base_url: []const u8, options:
 
 // --- Generate Content ---
 
+/// Generate content from the model given a conversation history and configuration.
 pub fn generateContent(
     self: *Client,
     model: []const u8,
@@ -167,6 +184,7 @@ pub fn generateContent(
     }, GenerateContentResponse);
 }
 
+/// Convenience: generate content from a single text prompt.
 pub fn generateContentFromText(
     self: *Client,
     model: []const u8,
@@ -187,6 +205,9 @@ pub const StreamError = error{
     InvalidSseData,
 } || std.http.Client.RequestError || std.http.Client.Request.ReceiveHeadError || std.Io.Writer.Error || std.Io.Reader.DelimiterError || std.json.ParseError(std.json.Scanner) || std.mem.Allocator.Error || std.Uri.ParseError;
 
+/// Generate content with streaming via Server-Sent Events.
+/// The `callback` is invoked for each chunk as it arrives.
+/// Pass a `context` value to carry state into the callback.
 pub fn generateContentStream(
     self: *Client,
     model: []const u8,
@@ -264,6 +285,7 @@ pub fn generateContentStream(
     }
 }
 
+/// Convenience: stream content generation from a single text prompt.
 pub fn generateContentStreamFromText(
     self: *Client,
     model: []const u8,
@@ -280,6 +302,7 @@ pub fn generateContentStreamFromText(
 
 // --- Model Management ---
 
+/// Get metadata about a specific model (token limits, supported methods, etc.).
 pub fn getModel(self: *Client, model: []const u8) !Response(types.Model) {
     if (self.api_key.len == 0) return error.MissingApiKey;
     const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/models/{s}", .{ self.base_url, self.api_version, model });
@@ -287,6 +310,7 @@ pub fn getModel(self: *Client, model: []const u8) !Response(types.Model) {
     return self.fetchGet(url, types.Model);
 }
 
+/// List available models. Use `ListOptions` to paginate through results.
 pub fn listModels(self: *Client, options: ListOptions) !Response(types.ListModelsResponse) {
     if (self.api_key.len == 0) return error.MissingApiKey;
     const base = try std.fmt.allocPrint(self.allocator, "{s}/{s}/models", .{ self.base_url, self.api_version });
@@ -298,6 +322,7 @@ pub fn listModels(self: *Client, options: ListOptions) !Response(types.ListModel
 
 // --- Token Counting ---
 
+/// Count the number of tokens in the provided contents.
 pub fn countTokens(
     self: *Client,
     model: []const u8,
@@ -314,6 +339,7 @@ pub fn countTokens(
     }, types.CountTokensResponse);
 }
 
+/// Convenience: count tokens for a single text string.
 pub fn countTokensFromText(
     self: *Client,
     model: []const u8,
@@ -326,12 +352,17 @@ pub fn countTokensFromText(
 
 // --- Embeddings ---
 
+/// Configuration for embedding generation.
 pub const EmbedConfig = struct {
+    /// Type of task (e.g. "RETRIEVAL_DOCUMENT", "RETRIEVAL_QUERY", "SEMANTIC_SIMILARITY").
     taskType: ?[]const u8 = null,
+    /// Title for the text. Only applicable when taskType is "RETRIEVAL_DOCUMENT".
     title: ?[]const u8 = null,
+    /// Reduced dimension for the output embedding vector.
     outputDimensionality: ?i32 = null,
 };
 
+/// Generate an embedding for the provided content using the specified model.
 pub fn embedContent(
     self: *Client,
     model: []const u8,
@@ -349,6 +380,7 @@ pub fn embedContent(
     }, types.EmbedContentResponse);
 }
 
+/// Convenience: generate an embedding for a single text string.
 pub fn embedText(
     self: *Client,
     model: []const u8,
@@ -361,12 +393,18 @@ pub fn embedText(
 
 // --- Files ---
 
+/// Configuration for file uploads.
 pub const UploadFileConfig = struct {
+    /// Optional resource name (e.g. "files/my-file").
     name: ?[]const u8 = null,
+    /// Human-readable display name (max 512 characters).
     displayName: ?[]const u8 = null,
+    /// MIME type of the file. Auto-detected if not provided.
     mimeType: ?[]const u8 = null,
 };
 
+/// Upload a file to the Gemini API using the resumable upload protocol.
+/// Returns the uploaded file metadata. The caller should call `deinit()` on the response.
 pub fn uploadFile(
     self: *Client,
     data: []const u8,
@@ -482,6 +520,7 @@ pub fn uploadFile(
     return .{ .value = parsed.value, .json_buf = response_buf, .parsed = parsed };
 }
 
+/// Get metadata for an uploaded file by its resource name (e.g. "files/abc123").
 pub fn getFile(self: *Client, name: []const u8) !Response(types.File) {
     if (self.api_key.len == 0) return error.MissingApiKey;
     const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/{s}", .{ self.base_url, self.api_version, name });
@@ -489,6 +528,7 @@ pub fn getFile(self: *Client, name: []const u8) !Response(types.File) {
     return self.fetchGet(url, types.File);
 }
 
+/// List uploaded files. Use `ListOptions` to paginate through results.
 pub fn listFiles(self: *Client, options: ListOptions) !Response(types.ListFilesResponse) {
     if (self.api_key.len == 0) return error.MissingApiKey;
     const base = try std.fmt.allocPrint(self.allocator, "{s}/{s}/files", .{ self.base_url, self.api_version });
@@ -498,6 +538,7 @@ pub fn listFiles(self: *Client, options: ListOptions) !Response(types.ListFilesR
     return self.fetchGet(url, types.ListFilesResponse);
 }
 
+/// Download file contents by URI. Returns owned bytes — caller must free with `allocator.free()`.
 pub fn downloadFile(self: *Client, uri: []const u8) ![]u8 {
     if (self.api_key.len == 0) return error.MissingApiKey;
 
@@ -522,6 +563,7 @@ pub fn downloadFile(self: *Client, uri: []const u8) ![]u8 {
     return response_buf.toOwnedSlice() catch return error.OutOfMemory;
 }
 
+/// Delete an uploaded file by its resource name.
 pub fn deleteFile(self: *Client, name: []const u8) !void {
     if (self.api_key.len == 0) return error.MissingApiKey;
     const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/{s}", .{ self.base_url, self.api_version, name });
@@ -541,16 +583,26 @@ pub fn deleteFile(self: *Client, name: []const u8) !void {
 
 // --- Cached Content ---
 
+/// Configuration for creating cached content.
 pub const CreateCachedContentConfig = struct {
+    /// The content to cache.
     contents: ?[]const Content = null,
+    /// System instruction to cache alongside the content.
     systemInstruction: ?Content = null,
+    /// Tools to cache alongside the content.
     tools: ?[]const Tool = null,
+    /// Tool configuration to cache.
     toolConfig: ?ToolConfig = null,
+    /// Human-readable display name for the cached content.
     displayName: ?[]const u8 = null,
+    /// TTL duration string (e.g. "3600s" for 1 hour). Mutually exclusive with `expireTime`.
     ttl: ?[]const u8 = null,
+    /// Expiration timestamp in RFC 3339 format. Mutually exclusive with `ttl`.
     expireTime: ?[]const u8 = null,
 };
 
+/// Create cached content for a model. Cached content reduces token usage and
+/// latency for repeated context.
 pub fn createCachedContent(
     self: *Client,
     model: []const u8,
@@ -575,6 +627,7 @@ pub fn createCachedContent(
     }, types.CachedContent);
 }
 
+/// Get metadata for cached content by its resource name.
 pub fn getCachedContent(self: *Client, name: []const u8) !Response(types.CachedContent) {
     if (self.api_key.len == 0) return error.MissingApiKey;
     const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/{s}", .{ self.base_url, self.api_version, name });
@@ -582,6 +635,7 @@ pub fn getCachedContent(self: *Client, name: []const u8) !Response(types.CachedC
     return self.fetchGet(url, types.CachedContent);
 }
 
+/// List cached contents. Use `ListOptions` to paginate through results.
 pub fn listCachedContents(self: *Client, options: ListOptions) !Response(types.ListCachedContentsResponse) {
     if (self.api_key.len == 0) return error.MissingApiKey;
     const base = try std.fmt.allocPrint(self.allocator, "{s}/{s}/cachedContents", .{ self.base_url, self.api_version });
@@ -591,6 +645,7 @@ pub fn listCachedContents(self: *Client, options: ListOptions) !Response(types.L
     return self.fetchGet(url, types.ListCachedContentsResponse);
 }
 
+/// Update the expiration of cached content (TTL or explicit timestamp).
 pub fn updateCachedContent(
     self: *Client,
     name: []const u8,
@@ -637,6 +692,7 @@ pub fn updateCachedContent(
     return .{ .value = parsed.value, .json_buf = response_buf, .parsed = parsed };
 }
 
+/// Delete cached content by its resource name.
 pub fn deleteCachedContent(self: *Client, name: []const u8) !void {
     if (self.api_key.len == 0) return error.MissingApiKey;
     const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/{s}", .{ self.base_url, self.api_version, name });

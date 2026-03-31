@@ -7,6 +7,9 @@ const Part = types.Part;
 const GenerationConfig = types.GenerationConfig;
 const GenerateContentResponse = types.GenerateContentResponse;
 
+/// A multi-turn chat session that automatically tracks conversation history.
+/// All user inputs are deep-copied into an arena, so temporary buffers are safe to use.
+/// Call `deinit()` when done to free all resources.
 const Chat = @This();
 
 client: *Client,
@@ -17,6 +20,7 @@ history: std.ArrayListUnmanaged(Content),
 responses: std.ArrayListUnmanaged(Client.Response(GenerateContentResponse)),
 arena: std.heap.ArenaAllocator,
 
+/// Create a new chat session with the given model and configuration.
 pub fn init(
     client: *Client,
     model: []const u8,
@@ -34,6 +38,7 @@ pub fn init(
     };
 }
 
+/// Release all resources: conversation history, response arenas, and owned strings.
 pub fn deinit(self: *Chat) void {
     self.history.deinit(self.client.allocator);
 
@@ -146,6 +151,7 @@ pub fn sendMessageStream(
     return self.sendStream(&parts, context, callback);
 }
 
+/// Return the full conversation history (user and model turns).
 pub fn getHistory(self: *const Chat) []const Content {
     return self.history.items;
 }

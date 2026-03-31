@@ -2,24 +2,39 @@ const std = @import("std");
 
 // --- Enums ---
 
+/// The harm category that a piece of content may be classified under.
 pub const HarmCategory = enum {
+    /// Default value. This value is unused.
     HARM_CATEGORY_UNSPECIFIED,
+    /// Abusive, threatening, or content intended to bully, torment, or ridicule.
     HARM_CATEGORY_HARASSMENT,
+    /// Content that promotes violence or incites hatred against individuals or groups.
     HARM_CATEGORY_HATE_SPEECH,
+    /// Content that contains sexually explicit material.
     HARM_CATEGORY_SEXUALLY_EXPLICIT,
+    /// Content that promotes, facilitates, or enables dangerous activities.
     HARM_CATEGORY_DANGEROUS_CONTENT,
+    /// The harm category is civic integrity.
     HARM_CATEGORY_CIVIC_INTEGRITY,
 };
 
+/// The threshold for blocking content based on harm probability.
 pub const HarmBlockThreshold = enum {
+    /// The harm block threshold is unspecified.
     HARM_BLOCK_THRESHOLD_UNSPECIFIED,
+    /// Block content with a low harm probability or higher.
     BLOCK_LOW_AND_ABOVE,
+    /// Block content with a medium harm probability or higher.
     BLOCK_MEDIUM_AND_ABOVE,
+    /// Block content with a high harm probability.
     BLOCK_ONLY_HIGH,
+    /// Do not block any content, regardless of its harm probability.
     BLOCK_NONE,
+    /// Turn off the safety filter entirely.
     OFF,
 };
 
+/// The probability level of harmful content.
 pub const HarmProbability = enum {
     HARM_PROBABILITY_UNSPECIFIED,
     NEGLIGIBLE,
@@ -28,6 +43,7 @@ pub const HarmProbability = enum {
     HIGH,
 };
 
+/// The severity level of harmful content.
 pub const HarmSeverity = enum {
     HARM_SEVERITY_UNSPECIFIED,
     HARM_SEVERITY_NEGLIGIBLE,
@@ -36,45 +52,76 @@ pub const HarmSeverity = enum {
     HARM_SEVERITY_HIGH,
 };
 
+/// The reason why the model stopped generating tokens.
 pub const FinishReason = enum {
+    /// The finish reason is unspecified.
     FINISH_REASON_UNSPECIFIED,
+    /// Token generation reached a natural stopping point or a configured stop sequence.
     STOP,
+    /// Token generation reached the configured maximum output tokens.
     MAX_TOKENS,
+    /// Token generation stopped because the content potentially contains safety violations.
     SAFETY,
+    /// Token generation stopped because of potential recitation.
     RECITATION,
+    /// Token generation stopped because of using an unsupported language.
     LANGUAGE,
+    /// All other reasons that stopped the token generation.
     OTHER,
+    /// Token generation stopped because the content contains forbidden terms.
     BLOCKLIST,
+    /// Token generation stopped for potentially containing prohibited content.
     PROHIBITED_CONTENT,
+    /// Token generation stopped because the content potentially contains Sensitive PII.
     SPII,
+    /// Token generation stopped due to a malformed function call.
     MALFORMED_FUNCTION_CALL,
 };
 
+/// Function calling mode.
 pub const FunctionCallingMode = enum {
+    /// Mode is unspecified.
     MODE_UNSPECIFIED,
+    /// Model decides whether to predict a function call or natural language response.
     AUTO,
+    /// Model is constrained to always predict a function call only.
     ANY,
+    /// Model will not predict any function call.
     NONE,
+    /// Model may predict a function call or natural language response (validated).
     VALIDATED,
 };
 
+/// Data type of a schema field (subset of OpenAPI 3.0 types).
 pub const SchemaType = enum {
+    /// Not specified, should not be used.
     TYPE_UNSPECIFIED,
+    /// OpenAPI string type.
     STRING,
+    /// OpenAPI number type.
     NUMBER,
+    /// OpenAPI integer type.
     INTEGER,
+    /// OpenAPI boolean type.
     BOOLEAN,
+    /// OpenAPI array type.
     ARRAY,
+    /// OpenAPI object type.
     OBJECT,
 };
 
+/// Outcome of code execution.
 pub const Outcome = enum {
     OUTCOME_UNSPECIFIED,
+    /// Code execution completed successfully.
     OUTCOME_OK,
+    /// Code execution failed.
     OUTCOME_FAILED,
+    /// Code execution ran for too long and was cancelled.
     OUTCOME_DEADLINE_EXCEEDED,
 };
 
+/// Programming language for executable code.
 pub const Language = enum {
     LANGUAGE_UNSPECIFIED,
     PYTHON,
@@ -82,81 +129,135 @@ pub const Language = enum {
 
 // --- Core Types ---
 
+/// A content blob containing raw bytes of a specific media type (images, audio, video).
 pub const Blob = struct {
+    /// The raw bytes of the data.
     data: ?[]const u8 = null,
+    /// The IANA standard MIME type of the source data.
     mimeType: ?[]const u8 = null,
+    /// Optional display name or filename for the blob.
     displayName: ?[]const u8 = null,
 };
 
+/// URI-based data pointing to a file in Google Cloud Storage.
 pub const FileData = struct {
+    /// The URI of the file.
     fileUri: ?[]const u8 = null,
+    /// The IANA standard MIME type of the source data.
     mimeType: ?[]const u8 = null,
 };
 
+/// A predicted function call returned from the model.
 pub const FunctionCall = struct {
+    /// The unique ID of the function call.
     id: ?[]const u8 = null,
+    /// The name of the function to call. Matches `FunctionDeclaration.name`.
     name: ?[]const u8 = null,
+    /// The function parameters and values in JSON object format.
     args: ?std.json.Value = null,
 };
 
+/// The result of a function call, to be sent back to the model.
 pub const FunctionResponse = struct {
+    /// The ID matching the corresponding `FunctionCall.id`.
     id: ?[]const u8 = null,
+    /// The name of the function called. Matches `FunctionCall.name`.
     name: ?[]const u8 = null,
+    /// The function response in JSON object format.
     response: ?std.json.Value = null,
 };
 
+/// Model-generated code that is intended to be executed.
+/// Only generated when using the `CodeExecution` tool.
 pub const ExecutableCode = struct {
+    /// The code to be executed.
     code: ?[]const u8 = null,
+    /// Programming language of the code.
     language: ?Language = null,
 };
 
+/// Result of executing the `ExecutableCode`.
 pub const CodeExecutionResult = struct {
+    /// Outcome of the code execution.
     outcome: ?Outcome = null,
+    /// Contains stdout when successful, stderr or other description otherwise.
     output: ?[]const u8 = null,
 };
 
+/// A datatype containing media content. Exactly one field within a Part should be set.
 pub const Part = struct {
+    /// Text content.
     text: ?[]const u8 = null,
+    /// Inline media bytes (images, audio, video).
     inlineData: ?Blob = null,
+    /// URI-based file reference (e.g. Google Cloud Storage).
     fileData: ?FileData = null,
+    /// A predicted function call returned from the model.
     functionCall: ?FunctionCall = null,
+    /// The result of a function execution, to be sent back to the model.
     functionResponse: ?FunctionResponse = null,
+    /// Code generated by the model that is intended to be executed.
     executableCode: ?ExecutableCode = null,
+    /// The result of executing the `ExecutableCode`.
     codeExecutionResult: ?CodeExecutionResult = null,
+    /// If true, marks this part as model reasoning/thinking (not final output).
     thought: ?bool = null,
 };
 
+/// Contains the multi-part content of a message.
 pub const Content = struct {
+    /// The producer of the content. Must be either "user" or "model".
     role: ?[]const u8 = null,
+    /// List of parts that constitute a single message.
     parts: []const Part,
 };
 
 // --- Schema ---
 
+/// A key-value pair for defining object properties in a `Schema`.
 pub const Property = struct {
     key: []const u8,
     value: Schema,
 };
 
+/// Defines the format of input/output data. Represents a subset of an
+/// OpenAPI 3.0 schema object.
+/// See https://spec.openapis.org/oas/v3.0.3#schema-object
 pub const Schema = struct {
+    /// Data type of the schema field.
     type: ?SchemaType = null,
+    /// Description of the data. The model uses this to understand the purpose of the schema.
     description: ?[]const u8 = null,
+    /// Possible values of the field (for enum types).
     @"enum": ?[]const []const u8 = null,
+    /// If type is ARRAY, specifies the schema of elements in the array.
     items: ?*const Schema = null,
+    /// If type is OBJECT, maps property names to their schema definitions.
     properties: ?[]const Property = null,
+    /// If type is OBJECT, lists property names that must be present.
     required: ?[]const []const u8 = null,
+    /// Indicates if the value can be null.
     nullable: ?bool = null,
+    /// Format of the data (e.g. "float", "int32", "email", "date-time").
     format: ?[]const u8 = null,
+    /// Title for the schema.
     title: ?[]const u8 = null,
+    /// Minimum allowed numeric value.
     minimum: ?f64 = null,
+    /// Maximum allowed numeric value.
     maximum: ?f64 = null,
+    /// Minimum number of items in an array.
     minItems: ?i64 = null,
+    /// Maximum number of items in an array.
     maxItems: ?i64 = null,
+    /// Minimum length of a string.
     minLength: ?i64 = null,
+    /// Maximum length of a string.
     maxLength: ?i64 = null,
+    /// Regex pattern that a string must match.
     pattern: ?[]const u8 = null,
 
-    /// Custom JSON serialization: emit `properties` as a JSON object instead of an array.
+    /// Custom JSON serialization: emits `properties` as a JSON object instead of an array.
     pub fn jsonStringify(self: *const Schema, jw: *std.json.Stringify) !void {
         try jw.beginObject();
         inline for (std.meta.fields(Schema)) |field| {
@@ -192,132 +293,222 @@ pub const Schema = struct {
 
 // --- Safety ---
 
+/// A safety setting that controls content blocking behavior for a specific harm category.
 pub const SafetySetting = struct {
+    /// The harm category to configure.
     category: ?HarmCategory = null,
+    /// The threshold above which content is blocked.
     threshold: ?HarmBlockThreshold = null,
 };
 
+/// A safety rating for a piece of content, indicating harm probability and severity.
 pub const SafetyRating = struct {
+    /// The harm category of this rating.
     category: ?HarmCategory = null,
+    /// The probability of harm for this category.
     probability: ?HarmProbability = null,
+    /// The probability score of harm (0-1).
     probabilityScore: ?f32 = null,
+    /// The severity level of harm.
     severity: ?HarmSeverity = null,
+    /// The severity score (0-1).
     severityScore: ?f32 = null,
+    /// Whether the content was blocked because of this rating.
     blocked: ?bool = null,
 };
 
 // --- Tools ---
 
+/// Structured representation of a function declaration as defined by the OpenAPI 3.0 spec.
+/// Can be used as a `Tool` by the model and executed by the client.
 pub const FunctionDeclaration = struct {
+    /// The name of the function. Must be a-z, A-Z, 0-9, underscores, dots, or dashes (max 64 chars).
     name: ?[]const u8 = null,
+    /// Description and purpose of the function. The model uses this to decide how and whether to call it.
     description: ?[]const u8 = null,
+    /// Parameters to this function in JSON Schema format.
     parameters: ?Schema = null,
 };
 
+/// Enables server-side code execution.
 pub const ToolCodeExecution = struct {};
 
+/// Enables Google Search grounding.
 pub const GoogleSearch = struct {};
 
+/// Tool details that the model may use to generate a response.
 pub const Tool = struct {
+    /// A list of function declarations available for the model to call.
     functionDeclarations: ?[]const FunctionDeclaration = null,
+    /// Enables server-side code execution.
     codeExecution: ?ToolCodeExecution = null,
+    /// Enables Google Search grounding.
     googleSearch: ?GoogleSearch = null,
 };
 
+/// Configuration for function calling behavior.
 pub const FunctionCallingConfig = struct {
+    /// Function calling mode (AUTO, ANY, NONE, VALIDATED).
     mode: ?FunctionCallingMode = null,
+    /// Function names to call. Only used when mode is ANY.
     allowedFunctionNames: ?[]const []const u8 = null,
 };
 
+/// Tool config shared for all tools provided in the request.
 pub const ToolConfig = struct {
+    /// Function calling config.
     functionCallingConfig: ?FunctionCallingConfig = null,
 };
 
 // --- Thinking Config ---
 
+/// Configuration for the model's thinking/reasoning features.
 pub const ThinkingConfig = struct {
+    /// Whether to include the model's thoughts in the response.
     includeThoughts: ?bool = null,
+    /// Budget in tokens for model thinking. Set to 0 to disable thinking.
     thinkingBudget: ?i32 = null,
 };
 
 // --- Generation Config ---
 
+/// Optional model configuration parameters for content generation.
 pub const GenerationConfig = struct {
+    /// Controls the degree of randomness in token selection (0.0-2.0).
+    /// Lower values produce more deterministic output.
     temperature: ?f32 = null,
+    /// Nucleus sampling threshold. Tokens are selected from most to least probable
+    /// until their cumulative probability equals this value.
     topP: ?f32 = null,
+    /// Top-k sampling: the model considers only the top k most probable tokens.
     topK: ?f32 = null,
+    /// Number of response candidates to generate.
     candidateCount: ?i32 = null,
+    /// Maximum number of tokens in the generated response.
     maxOutputTokens: ?i32 = null,
+    /// Sequences that will stop generation when encountered.
     stopSequences: ?[]const []const u8 = null,
+    /// Penalizes tokens that have already appeared, encouraging diversity.
     presencePenalty: ?f32 = null,
+    /// Penalizes tokens based on frequency of appearance, reducing repetition.
     frequencyPenalty: ?f32 = null,
+    /// Random seed for deterministic generation.
     seed: ?i32 = null,
+    /// Output format MIME type (e.g. "text/plain", "application/json").
     responseMimeType: ?[]const u8 = null,
+    /// Schema defining the expected structure of JSON output.
     responseSchema: ?Schema = null,
+    /// Whether to return log probabilities of generated tokens.
     responseLogprobs: ?bool = null,
+    /// Number of top candidate tokens to return log probabilities for.
     logprobs: ?i32 = null,
+    /// Configuration for the model's thinking/reasoning features.
     thinkingConfig: ?ThinkingConfig = null,
+    /// Resource name of cached content to use as context.
     cachedContent: ?[]const u8 = null,
+    /// Requested response modalities (e.g. "TEXT", "IMAGE", "AUDIO").
     responseModalities: ?[]const []const u8 = null,
+    /// Media resolution for input media (LOW, MEDIUM, HIGH).
     mediaResolution: ?[]const u8 = null,
+    /// Whether to include audio timestamps in the response.
     audioTimestamp: ?bool = null,
 };
 
 // --- Request ---
 
+/// Request body for the generateContent endpoint.
 pub const GenerateContentRequest = struct {
+    /// The content of the conversation so far.
     contents: []const Content,
+    /// Optional generation parameters.
     generationConfig: ?GenerationConfig = null,
+    /// System instructions to steer the model toward better performance.
     systemInstruction: ?Content = null,
+    /// Safety settings to filter content.
     safetySettings: ?[]const SafetySetting = null,
+    /// Tools the model may use to generate a response.
     tools: ?[]const Tool = null,
+    /// Configuration for tool usage.
     toolConfig: ?ToolConfig = null,
 };
 
 // --- Response Types ---
 
+/// A citation to an external source.
 pub const CitationSource = struct {
+    /// Start index of the cited text in the response.
     startIndex: ?i32 = null,
+    /// End index of the cited text in the response.
     endIndex: ?i32 = null,
+    /// URI of the cited source.
     uri: ?[]const u8 = null,
+    /// License of the cited source.
     license: ?[]const u8 = null,
 };
 
+/// Source attribution metadata for generated content.
 pub const CitationMetadata = struct {
     citationSources: ?[]const CitationSource = null,
 };
 
+/// A response candidate generated from the model.
 pub const Candidate = struct {
+    /// The generated content.
     content: ?Content = null,
+    /// The reason why the model stopped generating tokens.
     finishReason: ?FinishReason = null,
+    /// Safety ratings for this candidate.
     safetyRatings: ?[]const SafetyRating = null,
+    /// Source attribution of the generated content.
     citationMetadata: ?CitationMetadata = null,
+    /// Number of tokens for this candidate.
     tokenCount: ?i32 = null,
+    /// Average log probability of tokens. Higher values suggest more confident responses.
     avgLogprobs: ?f64 = null,
+    /// The index of this candidate.
     index: ?i32 = null,
 };
 
+/// Token usage metadata for a generate content request/response.
 pub const UsageMetadata = struct {
+    /// Number of tokens in the prompt.
     promptTokenCount: ?i32 = null,
+    /// Total number of tokens in the generated candidates.
     candidatesTokenCount: ?i32 = null,
+    /// Total token count (prompt + candidates).
     totalTokenCount: ?i32 = null,
+    /// Number of tokens from cached content.
     cachedContentTokenCount: ?i32 = null,
+    /// Number of tokens in the model's thinking/reasoning output.
     thoughtsTokenCount: ?i32 = null,
+    /// Number of tokens in tool execution results included in the prompt.
     toolUsePromptTokenCount: ?i32 = null,
 };
 
+/// Content filter results for a prompt. Only present when no candidates were
+/// generated due to content violations.
 pub const PromptFeedback = struct {
+    /// The reason the prompt was blocked.
     blockReason: ?[]const u8 = null,
+    /// Safety ratings for the prompt.
     safetyRatings: ?[]const SafetyRating = null,
 };
 
+/// Response from the generateContent or streamGenerateContent endpoint.
 pub const GenerateContentResponse = struct {
+    /// Response candidates generated by the model.
     candidates: ?[]const Candidate = null,
+    /// Token usage metadata.
     usageMetadata: ?UsageMetadata = null,
+    /// The model version used to generate the response.
     modelVersion: ?[]const u8 = null,
+    /// Unique response identifier.
     responseId: ?[]const u8 = null,
+    /// Timestamp when the request was made.
     createTime: ?[]const u8 = null,
+    /// Current status of the model.
     modelStatus: ?[]const u8 = null,
+    /// Content filter results for the prompt (only when candidates were blocked).
     promptFeedback: ?PromptFeedback = null,
 
     /// Extract text from the first candidate's first part.
@@ -352,39 +543,59 @@ pub const GenerateContentResponse = struct {
 
 // --- Error Types ---
 
+/// API error response wrapper.
 pub const ApiErrorResponse = struct {
     @"error": ?ApiErrorDetail = null,
 };
 
+/// Details of an API error.
 pub const ApiErrorDetail = struct {
+    /// HTTP status code.
     code: ?u32 = null,
+    /// Human-readable error message.
     message: ?[]const u8 = null,
+    /// Error status string (e.g. "INVALID_ARGUMENT").
     status: ?[]const u8 = null,
 };
 
 // --- Model Info ---
 
+/// A trained machine learning model.
 pub const Model = struct {
+    /// Resource name of the model (e.g. "models/gemini-2.5-flash").
     name: ?[]const u8 = null,
+    /// Human-readable display name.
     displayName: ?[]const u8 = null,
+    /// Description of the model.
     description: ?[]const u8 = null,
+    /// Version ID of the model.
     version: ?[]const u8 = null,
+    /// Maximum number of input tokens the model can handle.
     inputTokenLimit: ?i32 = null,
+    /// Maximum number of output tokens the model can generate.
     outputTokenLimit: ?i32 = null,
+    /// List of generation methods the model supports.
     supportedGenerationMethods: ?[]const []const u8 = null,
+    /// Default temperature for sampling.
     temperature: ?f32 = null,
+    /// Maximum allowed temperature value.
     maxTemperature: ?f32 = null,
+    /// Default top-p sampling threshold.
     topP: ?f32 = null,
+    /// Default top-k sampling value.
     topK: ?i32 = null,
 };
 
+/// Response from the listModels endpoint.
 pub const ListModelsResponse = struct {
     models: ?[]const Model = null,
+    /// Token for fetching the next page of results.
     nextPageToken: ?[]const u8 = null,
 };
 
 // --- Token Counting ---
 
+/// Request body for the countTokens endpoint.
 pub const CountTokensRequest = struct {
     contents: []const Content,
     systemInstruction: ?Content = null,
@@ -392,85 +603,127 @@ pub const CountTokensRequest = struct {
     generationConfig: ?GenerationConfig = null,
 };
 
+/// Response from the countTokens endpoint.
 pub const CountTokensResponse = struct {
+    /// Total number of tokens.
     totalTokens: ?i32 = null,
+    /// Number of tokens in the cached part of the prompt.
     cachedContentTokenCount: ?i32 = null,
 };
 
 // --- Embeddings ---
 
+/// Request body for the embedContent endpoint.
 pub const EmbedContentRequest = struct {
+    /// The content to generate an embedding for.
     content: ?Content = null,
+    /// Type of task for which the embedding will be used.
     taskType: ?[]const u8 = null,
+    /// Title for the text. Only applicable when taskType is "RETRIEVAL_DOCUMENT".
     title: ?[]const u8 = null,
+    /// Reduced dimension for the output embedding.
     outputDimensionality: ?i32 = null,
 };
 
+/// The embedding generated from an input content.
 pub const ContentEmbedding = struct {
+    /// A list of floats representing the embedding vector.
     values: ?[]const f32 = null,
 };
 
+/// Response from the embedContent endpoint.
 pub const EmbedContentResponse = struct {
     embedding: ?ContentEmbedding = null,
 };
 
 // --- Files ---
 
+/// Processing state of an uploaded file.
 pub const FileState = enum {
     STATE_UNSPECIFIED,
+    /// The file is being processed and is not yet ready.
     PROCESSING,
+    /// The file is processed and ready to use.
     ACTIVE,
+    /// The file failed to process.
     FAILED,
 };
 
+/// A file uploaded to the API.
 pub const File = struct {
+    /// Resource name of the file (e.g. "files/abc123").
     name: ?[]const u8 = null,
+    /// Human-readable display name (max 512 characters).
     displayName: ?[]const u8 = null,
+    /// MIME type of the file.
     mimeType: ?[]const u8 = null,
+    /// Size of the file in bytes.
     sizeBytes: ?[]const u8 = null,
+    /// Timestamp when the file was created.
     createTime: ?[]const u8 = null,
+    /// Timestamp when the file was last updated.
     updateTime: ?[]const u8 = null,
+    /// Timestamp when the file will be deleted.
     expirationTime: ?[]const u8 = null,
+    /// SHA-256 hash of the uploaded file.
     sha256Hash: ?[]const u8 = null,
+    /// URI for referencing the file in API calls.
     uri: ?[]const u8 = null,
+    /// Processing state of the file.
     state: ?FileState = null,
 };
 
+/// Internal request body for file upload initialization.
 pub const UploadFileRequest = struct {
     file: ?UploadFileMetadata = null,
 };
 
+/// Metadata for a file being uploaded.
 pub const UploadFileMetadata = struct {
     name: ?[]const u8 = null,
     displayName: ?[]const u8 = null,
     mimeType: ?[]const u8 = null,
 };
 
+/// Response from the file upload endpoint.
 pub const UploadFileResponse = struct {
     file: ?File = null,
 };
 
+/// Response from the listFiles endpoint.
 pub const ListFilesResponse = struct {
     files: ?[]const File = null,
+    /// Token for fetching the next page of results.
     nextPageToken: ?[]const u8 = null,
 };
 
 // --- Cached Content ---
 
+/// Usage metadata for cached content.
 pub const CachedContentUsageMetadata = struct {
+    /// Total number of tokens in the cached content.
     totalTokenCount: ?i32 = null,
 };
 
+/// A resource used in LLM queries for users to explicitly specify what to cache.
 pub const CachedContent = struct {
+    /// Server-generated resource name of the cached content.
     name: ?[]const u8 = null,
+    /// User-provided display name.
     displayName: ?[]const u8 = null,
+    /// The model to use for cached content.
     model: ?[]const u8 = null,
+    /// Timestamp when the cache was created.
     createTime: ?[]const u8 = null,
+    /// Timestamp when the cache was last updated.
     updateTime: ?[]const u8 = null,
+    /// Timestamp when the cache expires.
     expireTime: ?[]const u8 = null,
+    /// Usage metadata for the cached content.
     usageMetadata: ?CachedContentUsageMetadata = null,
 };
 
+/// Request body for creating cached content.
 pub const CreateCachedContentRequest = struct {
     model: ?[]const u8 = null,
     contents: ?[]const Content = null,
@@ -478,17 +731,24 @@ pub const CreateCachedContentRequest = struct {
     tools: ?[]const Tool = null,
     toolConfig: ?ToolConfig = null,
     displayName: ?[]const u8 = null,
+    /// Duration string (e.g. "3600s" for 1 hour).
     ttl: ?[]const u8 = null,
+    /// RFC 3339 timestamp (e.g. "2026-04-01T00:00:00Z").
     expireTime: ?[]const u8 = null,
 };
 
+/// Request body for updating cached content expiration.
 pub const UpdateCachedContentRequest = struct {
+    /// Duration string (e.g. "3600s" for 1 hour).
     ttl: ?[]const u8 = null,
+    /// RFC 3339 timestamp (e.g. "2026-04-01T00:00:00Z").
     expireTime: ?[]const u8 = null,
 };
 
+/// Response from the listCachedContents endpoint.
 pub const ListCachedContentsResponse = struct {
     cachedContents: ?[]const CachedContent = null,
+    /// Token for fetching the next page of results.
     nextPageToken: ?[]const u8 = null,
 };
 
