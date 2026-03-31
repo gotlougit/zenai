@@ -278,6 +278,73 @@ pub fn generateContentStreamFromText(
     return self.generateContentStream(model, &contents, config, options, callback);
 }
 
+// --- Model Management ---
+
+pub const GetError = error{
+    ApiError,
+    MissingApiKey,
+    EmptyResponse,
+} || std.http.Client.FetchError || std.mem.Allocator.Error || std.Uri.ParseError;
+
+pub fn ParsedResponse(comptime T: type) type {
+    return struct {
+        value: T,
+        json_buf: std.Io.Writer.Allocating,
+        parsed: std.json.Parsed(T),
+
+        pub fn deinit(self: *@This()) void {
+            self.parsed.deinit();
+            self.json_buf.deinit();
+        }
+    };
+}
+
+fn fetchGet(self: *Client, url: []const u8, comptime T: type) (GetError || std.json.ParseError(std.json.Scanner))!ParsedResponse(T) {
+    var response_buf: std.Io.Writer.Allocating = .init(self.allocator);
+    errdefer response_buf.deinit();
+
+    const result = try self.http_client.fetch(.{
+        .location = .{ .url = url },
+        .extra_headers = &.{
+            .{ .name = "x-goog-api-key", .value = self.api_key },
+        },
+        .response_writer = &response_buf.writer,
+    });
+
+    const body = response_buf.written();
+    const status_code = @intFromEnum(result.status);
+    if (status_code < 200 or status_code >= 300) {
+        if (body.len > 0) {
+            std.log.err("Gemini API error (HTTP {d}): {s}", .{ status_code, body });
+        }
+        return error.ApiError;
+    }
+
+    if (body.len == 0) return error.EmptyResponse;
+
+    const parsed = try std.json.parseFromSlice(T, self.allocator, body, .{ .ignore_unknown_fields = true });
+
+    return .{
+        .value = parsed.value,
+        .json_buf = response_buf,
+        .parsed = parsed,
+    };
+}
+
+pub fn getModel(self: *Client, model: []const u8) !ParsedResponse(types.Model) {
+    if (self.api_key.len == 0) return error.MissingApiKey;
+    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/models/{s}", .{ self.base_url, self.api_version, model });
+    defer self.allocator.free(url);
+    return self.fetchGet(url, types.Model);
+}
+
+pub fn listModels(self: *Client) !ParsedResponse(types.ListModelsResponse) {
+    if (self.api_key.len == 0) return error.MissingApiKey;
+    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/models", .{ self.base_url, self.api_version });
+    defer self.allocator.free(url);
+    return self.fetchGet(url, types.ListModelsResponse);
+}
+
 test "Client init and deinit" {
     var client = Client.init(std.testing.allocator, "test-key", .{});
     defer client.deinit();

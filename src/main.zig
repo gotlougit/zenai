@@ -14,6 +14,18 @@ pub fn main() !void {
     var client = zenai.Client.init(allocator, api_key, .{});
     defer client.deinit();
 
+    // --- Model info ---
+    std.debug.print("=== Model info ===\n", .{});
+    {
+        var model_info = try client.getModel("gemini-2.5-flash");
+        defer model_info.deinit();
+        const m = model_info.value;
+        std.debug.print("Name: {s}\n", .{m.name orelse "?"});
+        std.debug.print("Display: {s}\n", .{m.displayName orelse "?"});
+        std.debug.print("Input limit: {d} tokens\n", .{m.inputTokenLimit orelse 0});
+        std.debug.print("Output limit: {d} tokens\n\n", .{m.outputTokenLimit orelse 0});
+    }
+
     // --- Simple text generation ---
     std.debug.print("=== Simple text generation ===\n", .{});
     {

@@ -349,6 +349,27 @@ pub const ApiErrorDetail = struct {
     status: ?[]const u8 = null,
 };
 
+// --- Model Info ---
+
+pub const Model = struct {
+    name: ?[]const u8 = null,
+    displayName: ?[]const u8 = null,
+    description: ?[]const u8 = null,
+    version: ?[]const u8 = null,
+    inputTokenLimit: ?i32 = null,
+    outputTokenLimit: ?i32 = null,
+    supportedGenerationMethods: ?[]const []const u8 = null,
+    temperature: ?f32 = null,
+    maxTemperature: ?f32 = null,
+    topP: ?f32 = null,
+    topK: ?i32 = null,
+};
+
+pub const ListModelsResponse = struct {
+    models: ?[]const Model = null,
+    nextPageToken: ?[]const u8 = null,
+};
+
 // --- Tests ---
 
 test "GenerateContentRequest serializes to JSON" {
