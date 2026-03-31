@@ -331,6 +331,49 @@ fn fetchGet(self: *Client, url: []const u8, comptime T: type) (GetError || std.j
     };
 }
 
+fn fetchPost(self: *Client, url: []const u8, body: anytype, comptime T: type) (GetError || std.json.ParseError(std.json.Scanner))!ParsedResponse(T) {
+    var payload_buf: std.Io.Writer.Allocating = .init(self.allocator);
+    defer payload_buf.deinit();
+    std.json.Stringify.value(body, .{ .emit_null_optional_fields = false }, &payload_buf.writer) catch
+        return error.OutOfMemory;
+    const payload = payload_buf.written();
+
+    var response_buf: std.Io.Writer.Allocating = .init(self.allocator);
+    errdefer response_buf.deinit();
+
+    const result = try self.http_client.fetch(.{
+        .location = .{ .url = url },
+        .method = .POST,
+        .payload = payload,
+        .extra_headers = &.{
+            .{ .name = "x-goog-api-key", .value = self.api_key },
+        },
+        .headers = .{
+            .content_type = .{ .override = "application/json" },
+        },
+        .response_writer = &response_buf.writer,
+    });
+
+    const resp_body = response_buf.written();
+    const status_code = @intFromEnum(result.status);
+    if (status_code < 200 or status_code >= 300) {
+        if (resp_body.len > 0) {
+            std.log.err("Gemini API error (HTTP {d}): {s}", .{ status_code, resp_body });
+        }
+        return error.ApiError;
+    }
+
+    if (resp_body.len == 0) return error.EmptyResponse;
+
+    const parsed = try std.json.parseFromSlice(T, self.allocator, resp_body, .{ .ignore_unknown_fields = true });
+
+    return .{
+        .value = parsed.value,
+        .json_buf = response_buf,
+        .parsed = parsed,
+    };
+}
+
 pub fn getModel(self: *Client, model: []const u8) !ParsedResponse(types.Model) {
     if (self.api_key.len == 0) return error.MissingApiKey;
     const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/models/{s}", .{ self.base_url, self.api_version, model });
@@ -343,6 +386,34 @@ pub fn listModels(self: *Client) !ParsedResponse(types.ListModelsResponse) {
     const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/models", .{ self.base_url, self.api_version });
     defer self.allocator.free(url);
     return self.fetchGet(url, types.ListModelsResponse);
+}
+
+// --- Token Counting ---
+
+pub fn countTokens(
+    self: *Client,
+    model: []const u8,
+    contents: []const Content,
+    options: RequestOptions,
+) !ParsedResponse(types.CountTokensResponse) {
+    if (self.api_key.len == 0) return error.MissingApiKey;
+    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/models/{s}:countTokens", .{ self.base_url, self.api_version, model });
+    defer self.allocator.free(url);
+    return self.fetchPost(url, types.CountTokensRequest{
+        .contents = contents,
+        .systemInstruction = options.systemInstruction,
+        .tools = options.tools,
+    }, types.CountTokensResponse);
+}
+
+pub fn countTokensFromText(
+    self: *Client,
+    model: []const u8,
+    prompt: []const u8,
+) !ParsedResponse(types.CountTokensResponse) {
+    const parts = [_]Part{.{ .text = prompt }};
+    const contents = [_]Content{.{ .role = "user", .parts = &parts }};
+    return self.countTokens(model, &contents, .{});
 }
 
 test "Client init and deinit" {

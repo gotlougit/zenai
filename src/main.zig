@@ -26,6 +26,14 @@ pub fn main() !void {
         std.debug.print("Output limit: {d} tokens\n\n", .{m.outputTokenLimit orelse 0});
     }
 
+    // --- Token counting ---
+    std.debug.print("=== Token counting ===\n", .{});
+    {
+        var result = try client.countTokensFromText("gemini-2.5-flash", "What is the meaning of life?");
+        defer result.deinit();
+        std.debug.print("Tokens: {d}\n\n", .{result.value.totalTokens orelse 0});
+    }
+
     // --- Simple text generation ---
     std.debug.print("=== Simple text generation ===\n", .{});
     {

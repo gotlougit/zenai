@@ -370,6 +370,20 @@ pub const ListModelsResponse = struct {
     nextPageToken: ?[]const u8 = null,
 };
 
+// --- Token Counting ---
+
+pub const CountTokensRequest = struct {
+    contents: []const Content,
+    systemInstruction: ?Content = null,
+    tools: ?[]const Tool = null,
+    generationConfig: ?GenerationConfig = null,
+};
+
+pub const CountTokensResponse = struct {
+    totalTokens: ?i32 = null,
+    cachedContentTokenCount: ?i32 = null,
+};
+
 // --- Tests ---
 
 test "GenerateContentRequest serializes to JSON" {
