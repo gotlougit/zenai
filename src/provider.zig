@@ -104,9 +104,16 @@ pub const Client = union(enum) {
     ) Error!GenerateResult {
         switch (self) {
             .gemini => |g| {
-                // Convert messages to Gemini Content format
-                const contents = try messagesToGeminiContents(g.allocator, messages);
+                // Extract system messages and convert the rest to Gemini Content format
+                const separated = try separateSystemMessages(g.allocator, messages);
+                const contents = separated.contents;
                 defer g.allocator.free(contents);
+
+                // Build systemInstruction from system messages
+                const sys_instruction: ?gemini_types.Content = if (separated.system_text) |sys|
+                    gemini_types.Content{ .parts = @as([]const gemini_types.Part, &.{.{ .text = sys }}) }
+                else
+                    null;
 
                 var response = try g.generateContent(model, contents, gemini_types.GenerationConfig{
                     .temperature = config.temperature,
@@ -116,7 +123,7 @@ pub const Client = union(enum) {
                     .frequencyPenalty = config.frequency_penalty,
                     .presencePenalty = config.presence_penalty,
                     .seed = config.seed,
-                }, .{});
+                }, .{ .systemInstruction = sys_instruction });
 
                 return GenerateResult{
                     .text = response.value.text(),
@@ -150,10 +157,19 @@ pub const Client = union(enum) {
                 };
             },
             .anthropic => |a| {
-                const ant_messages = try messagesToAnthropicMessages(a.allocator, messages);
+                const separated = try separateSystemMessages(a.allocator, messages);
+                const ant_messages = try messagesToAnthropicMessages(a.allocator, separated.contents);
+                defer a.allocator.free(separated.contents);
                 defer a.allocator.free(ant_messages);
 
+                // Build system blocks from system messages
+                const system_blocks: ?[]const anthropic_types.TextBlock = if (separated.system_text) |sys|
+                    @as([]const anthropic_types.TextBlock, &.{.{ .text = sys }})
+                else
+                    null;
+
                 const response = try a.createMessage(model, ant_messages, config.max_tokens orelse 4096, .{
+                    .system = system_blocks,
                     .temperature = config.temperature,
                     .top_p = config.top_p,
                     .stop_sequences = config.stop,
@@ -181,8 +197,14 @@ pub const Client = union(enum) {
     ) StreamError!void {
         switch (self) {
             .gemini => |g| {
-                const contents = messagesToGeminiContents(g.allocator, messages) catch return error.OutOfMemory;
+                const separated = separateSystemMessages(g.allocator, messages) catch return error.OutOfMemory;
+                const contents = separated.contents;
                 defer g.allocator.free(contents);
+
+                const sys_instruction: ?gemini_types.Content = if (separated.system_text) |sys|
+                    gemini_types.Content{ .parts = @as([]const gemini_types.Part, &.{.{ .text = sys }}) }
+                else
+                    null;
 
                 const Wrapper = struct {
                     fn wrap(ctx: struct { user_ctx: @TypeOf(context), user_cb: *const fn (@TypeOf(context), GenerateResult) void, alloc: std.mem.Allocator }, response: gemini_types.GenerateContentResponse) void {
@@ -204,7 +226,7 @@ pub const Client = union(enum) {
                     .frequencyPenalty = config.frequency_penalty,
                     .presencePenalty = config.presence_penalty,
                     .seed = config.seed,
-                }, .{}, .{ .user_ctx = context, .user_cb = callback, .alloc = g.allocator }, &Wrapper.wrap);
+                }, .{ .systemInstruction = sys_instruction }, .{ .user_ctx = context, .user_cb = callback, .alloc = g.allocator }, &Wrapper.wrap);
             },
             .openai => |o| {
                 const oai_messages = messagesToOpenAIMessages(o.allocator, messages) catch return error.OutOfMemory;
@@ -233,8 +255,15 @@ pub const Client = union(enum) {
                 }, .{ .user_ctx = context, .user_cb = callback, .alloc = o.allocator }, &Wrapper.wrap);
             },
             .anthropic => |a| {
-                const ant_messages = messagesToAnthropicMessages(a.allocator, messages) catch return error.OutOfMemory;
+                const separated = separateSystemMessages(a.allocator, messages) catch return error.OutOfMemory;
+                const ant_messages = messagesToAnthropicMessages(a.allocator, separated.contents) catch return error.OutOfMemory;
+                defer a.allocator.free(separated.contents);
                 defer a.allocator.free(ant_messages);
+
+                const system_blocks: ?[]const anthropic_types.TextBlock = if (separated.system_text) |sys|
+                    @as([]const anthropic_types.TextBlock, &.{.{ .text = sys }})
+                else
+                    null;
 
                 const Wrapper = struct {
                     fn wrap(ctx: struct { user_ctx: @TypeOf(context), user_cb: *const fn (@TypeOf(context), GenerateResult) void, alloc: std.mem.Allocator }, event: anthropic_types.StreamEvent) void {
@@ -250,6 +279,7 @@ pub const Client = union(enum) {
                 };
 
                 try a.createMessageStream(model, ant_messages, config.max_tokens orelse 4096, .{
+                    .system = system_blocks,
                     .temperature = config.temperature,
                     .top_p = config.top_p,
                     .stop_sequences = config.stop,
@@ -318,20 +348,47 @@ pub const Client = union(enum) {
 
 // --- Conversion helpers ---
 
-fn messagesToGeminiContents(allocator: std.mem.Allocator, messages: []const Message) ![]gemini_types.Content {
-    const contents = try allocator.alloc(gemini_types.Content, messages.len);
-    for (messages, 0..) |msg, i| {
+const SeparatedMessages = struct {
+    /// Non-system messages, allocated by the caller's allocator.
+    contents: []gemini_types.Content,
+    /// Concatenated system message text (borrowed from input), or null if none.
+    system_text: ?[]const u8,
+};
+
+/// Extract system messages from the input and return the rest as Gemini Content.
+/// System messages are collected into a single text; non-system messages are
+/// converted to Gemini Content format.
+fn separateSystemMessages(allocator: std.mem.Allocator, messages: []const Message) !SeparatedMessages {
+    // Find first system message text (borrow pointer — no allocation needed)
+    var system_text: ?[]const u8 = null;
+    var non_system_count: usize = 0;
+    for (messages) |msg| {
+        if (msg.role == .system) {
+            // Use first system message; ignore subsequent ones
+            if (system_text == null) system_text = msg.content;
+        } else {
+            non_system_count += 1;
+        }
+    }
+
+    const contents = try allocator.alloc(gemini_types.Content, non_system_count);
+    var idx: usize = 0;
+    for (messages) |msg| {
+        if (msg.role == .system) continue;
         const role: []const u8 = switch (msg.role) {
-            .system, .user, .tool => "user",
+            .user, .tool => "user",
             .assistant => "model",
+            .system => unreachable,
         };
         const parts: []const gemini_types.Part = if (msg.content) |c|
             @as([]const gemini_types.Part, &.{.{ .text = c }})
         else
             &.{};
-        contents[i] = .{ .role = role, .parts = parts };
+        contents[idx] = .{ .role = role, .parts = parts };
+        idx += 1;
     }
-    return contents;
+
+    return .{ .contents = contents, .system_text = system_text };
 }
 
 fn messagesToOpenAIMessages(allocator: std.mem.Allocator, messages: []const Message) ![]openai_types.Message {
@@ -393,15 +450,17 @@ fn mapOpenAIUsage(response: openai_types.ChatCompletionResponse) Usage {
     };
 }
 
-fn messagesToAnthropicMessages(allocator: std.mem.Allocator, messages: []const Message) ![]anthropic_types.MessageParam {
-    const ant_messages = try allocator.alloc(anthropic_types.MessageParam, messages.len);
-    for (messages, 0..) |msg, i| {
-        const role: anthropic_types.Role = switch (msg.role) {
-            .system, .user, .tool => .user,
-            .assistant => .assistant,
-        };
-        const content: []const anthropic_types.ContentBlockParam = if (msg.content) |c|
-            @as([]const anthropic_types.ContentBlockParam, &.{.{ .text = c }})
+fn messagesToAnthropicMessages(allocator: std.mem.Allocator, contents: []gemini_types.Content) ![]anthropic_types.MessageParam {
+    const ant_messages = try allocator.alloc(anthropic_types.MessageParam, contents.len);
+    for (contents, 0..) |c, i| {
+        const role: anthropic_types.Role = if (c.role) |r|
+            if (std.mem.eql(u8, r, "model")) .assistant else .user
+        else
+            .user;
+        // Extract text from the first Gemini part
+        const text_content: ?[]const u8 = if (c.parts.len > 0) c.parts[0].text else null;
+        const content: []const anthropic_types.ContentBlockParam = if (text_content) |t|
+            @as([]const anthropic_types.ContentBlockParam, &.{.{ .text = t }})
         else
             &.{};
         ant_messages[i] = .{ .role = role, .content = content };

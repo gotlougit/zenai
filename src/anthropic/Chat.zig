@@ -1,6 +1,7 @@
 const std = @import("std");
 const types = @import("types.zig");
 const Client = @import("Client.zig");
+const http = @import("../http.zig");
 
 const MessageParam = types.MessageParam;
 const ContentBlockParam = types.ContentBlockParam;
@@ -193,7 +194,7 @@ fn responseToContentBlocks(self: *Chat, response: MessageResponse) std.mem.Alloc
             .text = if (block.text) |t| try a.dupe(u8, t) else null,
             .id = if (block.id) |v| try a.dupe(u8, v) else null,
             .name = if (block.name) |v| try a.dupe(u8, v) else null,
-            .input = if (block.input) |v| try dupeJsonValue(a, v) else null,
+            .input = if (block.input) |v| try http.dupeJsonValue(a, v) else null,
             .thinking = if (block.thinking) |v| try a.dupe(u8, v) else null,
             .signature = if (block.signature) |v| try a.dupe(u8, v) else null,
         };
@@ -210,37 +211,13 @@ fn dupeContentBlocks(self: *Chat, blocks: []const ContentBlockParam) std.mem.All
         if (block.text) |v| duped[i].text = try a.dupe(u8, v);
         if (block.id) |v| duped[i].id = try a.dupe(u8, v);
         if (block.name) |v| duped[i].name = try a.dupe(u8, v);
-        if (block.input) |v| duped[i].input = try dupeJsonValue(a, v);
+        if (block.input) |v| duped[i].input = try http.dupeJsonValue(a, v);
         if (block.tool_use_id) |v| duped[i].tool_use_id = try a.dupe(u8, v);
         if (block.content) |v| duped[i].content = try a.dupe(u8, v);
         if (block.thinking) |v| duped[i].thinking = try a.dupe(u8, v);
         if (block.signature) |v| duped[i].signature = try a.dupe(u8, v);
     }
     return duped;
-}
-
-fn dupeJsonValue(a: std.mem.Allocator, value: std.json.Value) std.mem.Allocator.Error!std.json.Value {
-    return switch (value) {
-        .null, .bool, .integer, .float => value,
-        .number_string => |s| .{ .number_string = try a.dupe(u8, s) },
-        .string => |s| .{ .string = try a.dupe(u8, s) },
-        .array => |arr| blk: {
-            var new_arr = try std.json.Array.initCapacity(a, arr.items.len);
-            for (arr.items) |item| {
-                new_arr.appendAssumeCapacity(try dupeJsonValue(a, item));
-            }
-            break :blk .{ .array = new_arr };
-        },
-        .object => |obj| blk: {
-            var new_obj = std.json.ObjectMap.init(a);
-            try new_obj.ensureTotalCapacity(@intCast(obj.count()));
-            var it = obj.iterator();
-            while (it.next()) |entry| {
-                new_obj.putAssumeCapacity(try a.dupe(u8, entry.key_ptr.*), try dupeJsonValue(a, entry.value_ptr.*));
-            }
-            break :blk .{ .object = new_obj };
-        },
-    };
 }
 
 test "Chat init and deinit" {
