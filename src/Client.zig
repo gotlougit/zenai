@@ -19,6 +19,9 @@ api_key: []const u8,
 base_url: []const u8,
 api_version: []const u8,
 http_client: std.http.Client,
+/// The most recent API error detail, if any. Set on `error.ApiError`.
+last_error: ?types.ApiErrorDetail = null,
+last_error_status: ?u10 = null,
 
 /// Options for customizing the API endpoint.
 pub const InitOptions = struct {
@@ -37,6 +40,8 @@ pub fn init(allocator: std.mem.Allocator, api_key: []const u8, options: InitOpti
         .base_url = options.base_url,
         .api_version = options.api_version,
         .http_client = .{ .allocator = allocator },
+        .last_error = null,
+        .last_error_status = null,
     };
 }
 
@@ -84,6 +89,18 @@ pub const ApiError = error{
 
 // --- Internal helpers ---
 
+fn setErrorDetail(self: *Client, status_code: u10, body: []const u8) void {
+    self.last_error_status = status_code;
+    self.last_error = null;
+    if (body.len > 0) {
+        std.log.err("Gemini API error (HTTP {d}): {s}", .{ status_code, body });
+        if (std.json.parseFromSlice(types.ApiErrorResponse, self.allocator, body, .{ .ignore_unknown_fields = true })) |parsed| {
+            self.last_error = parsed.value.@"error";
+            parsed.deinit();
+        } else |_| {}
+    }
+}
+
 fn fetchGet(self: *Client, url: []const u8, comptime T: type) ApiError!Response(T) {
     var response_buf: std.Io.Writer.Allocating = .init(self.allocator);
     errdefer response_buf.deinit();
@@ -97,9 +114,9 @@ fn fetchGet(self: *Client, url: []const u8, comptime T: type) ApiError!Response(
     });
 
     const body = response_buf.written();
-    const status_code = @intFromEnum(result.status);
+    const status_code: u10 = @intFromEnum(result.status);
     if (status_code < 200 or status_code >= 300) {
-        if (body.len > 0) std.log.err("Gemini API error (HTTP {d}): {s}", .{ status_code, body });
+        self.setErrorDetail(status_code, body);
         return error.ApiError;
     }
     if (body.len == 0) return error.EmptyResponse;
@@ -132,9 +149,9 @@ fn fetchPost(self: *Client, url: []const u8, body: anytype, comptime T: type) Ap
     });
 
     const resp_body = response_buf.written();
-    const status_code = @intFromEnum(result.status);
+    const status_code: u10 = @intFromEnum(result.status);
     if (status_code < 200 or status_code >= 300) {
-        if (resp_body.len > 0) std.log.err("Gemini API error (HTTP {d}): {s}", .{ status_code, resp_body });
+        self.setErrorDetail(status_code, resp_body);
         return error.ApiError;
     }
     if (resp_body.len == 0) return error.EmptyResponse;
@@ -265,9 +282,9 @@ pub fn generateContentStream(
     var redirect_buf: [0]u8 = undefined;
     var response = try req.receiveHead(&redirect_buf);
 
-    const status_code = @intFromEnum(response.head.status);
+    const status_code: u10 = @intFromEnum(response.head.status);
     if (status_code < 200 or status_code >= 300) {
-        std.log.err("Gemini API streaming error (HTTP {d})", .{status_code});
+        self.setErrorDetail(status_code, "");
         return error.ApiError;
     }
 
@@ -465,9 +482,9 @@ pub fn uploadFile(
     var redirect_buf: [0]u8 = undefined;
     var init_response = try req.receiveHead(&redirect_buf);
 
-    const init_status = @intFromEnum(init_response.head.status);
+    const init_status: u10 = @intFromEnum(init_response.head.status);
     if (init_status < 200 or init_status >= 300) {
-        std.log.err("Gemini file upload init error (HTTP {d})", .{init_status});
+        self.setErrorDetail(init_status, "");
         return error.ApiError;
     }
 
@@ -511,9 +528,9 @@ pub fn uploadFile(
     var upload_redirect_buf: [0]u8 = undefined;
     var upload_response = try upload_req.receiveHead(&upload_redirect_buf);
 
-    const upload_status = @intFromEnum(upload_response.head.status);
+    const upload_status: u10 = @intFromEnum(upload_response.head.status);
     if (upload_status < 200 or upload_status >= 300) {
-        std.log.err("Gemini file upload error (HTTP {d})", .{upload_status});
+        self.setErrorDetail(upload_status, "");
         return error.ApiError;
     }
 
@@ -564,8 +581,9 @@ pub fn downloadFile(self: *Client, uri: []const u8) ![]u8 {
         .response_writer = &response_buf.writer,
     });
 
-    const status_code = @intFromEnum(result.status);
+    const status_code: u10 = @intFromEnum(result.status);
     if (status_code < 200 or status_code >= 300) {
+        self.setErrorDetail(status_code, response_buf.written());
         response_buf.deinit();
         return error.ApiError;
     }
@@ -587,8 +605,11 @@ pub fn deleteFile(self: *Client, name: []const u8) !void {
         },
     });
 
-    const status_code = @intFromEnum(result.status);
-    if (status_code < 200 or status_code >= 300) return error.ApiError;
+    const status_code: u10 = @intFromEnum(result.status);
+    if (status_code < 200 or status_code >= 300) {
+        self.setErrorDetail(status_code, "");
+        return error.ApiError;
+    }
 }
 
 // --- Cached Content ---
@@ -691,9 +712,9 @@ pub fn updateCachedContent(
     });
 
     const body = response_buf.written();
-    const status_code = @intFromEnum(result.status);
+    const status_code: u10 = @intFromEnum(result.status);
     if (status_code < 200 or status_code >= 300) {
-        if (body.len > 0) std.log.err("Gemini API error (HTTP {d}): {s}", .{ status_code, body });
+        self.setErrorDetail(status_code, body);
         return error.ApiError;
     }
     if (body.len == 0) return error.EmptyResponse;
@@ -716,8 +737,11 @@ pub fn deleteCachedContent(self: *Client, name: []const u8) !void {
         },
     });
 
-    const status_code = @intFromEnum(result.status);
-    if (status_code < 200 or status_code >= 300) return error.ApiError;
+    const status_code: u10 = @intFromEnum(result.status);
+    if (status_code < 200 or status_code >= 300) {
+        self.setErrorDetail(status_code, "");
+        return error.ApiError;
+    }
 }
 
 test "Client init and deinit" {
