@@ -683,7 +683,18 @@ pub fn updateCachedContent(
     config: struct { ttl: ?[]const u8 = null, expireTime: ?[]const u8 = null },
 ) !Response(types.CachedContent) {
     if (self.api_key.len == 0) return error.MissingApiKey;
-    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/{s}", .{ self.base_url, self.api_version, name });
+
+    // Build updateMask from non-null fields
+    const update_mask: []const u8 = if (config.ttl != null and config.expireTime != null)
+        "ttl,expireTime"
+    else if (config.ttl != null)
+        "ttl"
+    else if (config.expireTime != null)
+        "expireTime"
+    else
+        "";
+
+    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/{s}?updateMask={s}", .{ self.base_url, self.api_version, name, update_mask });
     defer self.allocator.free(url);
 
     var payload_buf: std.Io.Writer.Allocating = .init(self.allocator);
