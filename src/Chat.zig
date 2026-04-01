@@ -171,8 +171,50 @@ fn dupeParts(self: *Chat, parts: []const Part) std.mem.Allocator.Error![]Part {
             if (fd.fileUri) |u| duped[i].fileData.?.fileUri = try a.dupe(u8, u);
             if (fd.mimeType) |m| duped[i].fileData.?.mimeType = try a.dupe(u8, m);
         }
+        if (part.functionCall) |fc| {
+            if (fc.id) |v| duped[i].functionCall.?.id = try a.dupe(u8, v);
+            if (fc.name) |v| duped[i].functionCall.?.name = try a.dupe(u8, v);
+            if (fc.args) |v| duped[i].functionCall.?.args = try dupeJsonValue(a, v);
+        }
+        if (part.functionResponse) |fr| {
+            if (fr.id) |v| duped[i].functionResponse.?.id = try a.dupe(u8, v);
+            if (fr.name) |v| duped[i].functionResponse.?.name = try a.dupe(u8, v);
+            if (fr.response) |v| duped[i].functionResponse.?.response = try dupeJsonValue(a, v);
+        }
+        if (part.executableCode) |ec| {
+            if (ec.code) |v| duped[i].executableCode.?.code = try a.dupe(u8, v);
+        }
+        if (part.codeExecutionResult) |cr| {
+            if (cr.output) |v| duped[i].codeExecutionResult.?.output = try a.dupe(u8, v);
+        }
+        if (part.thoughtSignature) |v| duped[i].thoughtSignature = try a.dupe(u8, v);
+        if (part.partMetadata) |v| duped[i].partMetadata = try dupeJsonValue(a, v);
     }
     return duped;
+}
+
+fn dupeJsonValue(a: std.mem.Allocator, value: std.json.Value) std.mem.Allocator.Error!std.json.Value {
+    return switch (value) {
+        .null, .bool, .integer, .float => value,
+        .number_string => |s| .{ .number_string = try a.dupe(u8, s) },
+        .string => |s| .{ .string = try a.dupe(u8, s) },
+        .array => |arr| blk: {
+            var new_arr = try std.json.Array.initCapacity(a, arr.items.len);
+            for (arr.items) |item| {
+                new_arr.appendAssumeCapacity(try dupeJsonValue(a, item));
+            }
+            break :blk .{ .array = new_arr };
+        },
+        .object => |obj| blk: {
+            var new_obj = std.json.ObjectMap.init(a);
+            try new_obj.ensureTotalCapacity(@intCast(obj.count()));
+            var it = obj.iterator();
+            while (it.next()) |entry| {
+                new_obj.putAssumeCapacity(try a.dupe(u8, entry.key_ptr.*), try dupeJsonValue(a, entry.value_ptr.*));
+            }
+            break :blk .{ .object = new_obj };
+        },
+    };
 }
 
 test "Chat init and deinit" {
