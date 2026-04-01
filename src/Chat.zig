@@ -70,12 +70,11 @@ pub fn send(self: *Chat, user_parts: []const Part) Client.ApiError!GenerateConte
 
     try self.responses.append(self.client.allocator, response);
 
-    if (response.value.candidates) |candidates| {
-        if (candidates.len > 0) {
-            if (candidates[0].content) |content| {
-                try self.history.append(self.client.allocator, content);
-            }
-        }
+    if (validateResponse(response.value)) {
+        try self.history.append(self.client.allocator, response.value.candidates.?[0].content.?);
+    } else {
+        // Invalid response: remove the user turn so it doesn't pollute future requests.
+        _ = self.history.pop();
     }
 
     return response.value;
@@ -99,18 +98,27 @@ pub fn sendStream(
     const owned = self.dupeParts(user_parts) catch return error.OutOfMemory;
     self.history.append(self.client.allocator, Content{ .role = "user", .parts = owned }) catch return error.OutOfMemory;
 
-    var text_buf: std.ArrayListUnmanaged(u8) = .empty;
+    var collected_parts: std.ArrayListUnmanaged(Part) = .empty;
+    var is_valid = true;
     errdefer _ = self.history.pop();
 
     const StreamCtx = struct {
         user_ctx: @TypeOf(context),
         user_cb: *const fn (@TypeOf(context), GenerateContentResponse) void,
-        buf: *std.ArrayListUnmanaged(u8),
+        parts: *std.ArrayListUnmanaged(Part),
+        valid: *bool,
         alloc: std.mem.Allocator,
 
         fn handle(s: *const @This(), response: GenerateContentResponse) void {
-            if (response.text()) |t| {
-                s.buf.appendSlice(s.alloc, t) catch {};
+            if (!validateResponse(response)) {
+                s.valid.* = false;
+            }
+            if (response.candidates) |candidates| {
+                if (candidates.len > 0) {
+                    if (candidates[0].content) |content| {
+                        s.parts.appendSlice(s.alloc, content.parts) catch {};
+                    }
+                }
             }
             s.user_cb(s.user_ctx, response);
         }
@@ -118,7 +126,8 @@ pub fn sendStream(
     const stream_ctx = StreamCtx{
         .user_ctx = context,
         .user_cb = callback,
-        .buf = &text_buf,
+        .parts = &collected_parts,
+        .valid = &is_valid,
         .alloc = arena_alloc,
     };
 
@@ -134,10 +143,13 @@ pub fn sendStream(
         return err;
     };
 
-    const model_text = text_buf.items;
-    const model_parts = arena_alloc.alloc(Part, 1) catch return error.OutOfMemory;
-    model_parts[0] = .{ .text = model_text };
-    self.history.append(self.client.allocator, Content{ .role = "model", .parts = model_parts }) catch return error.OutOfMemory;
+    if (is_valid and collected_parts.items.len > 0) {
+        const model_parts = arena_alloc.dupe(Part, collected_parts.items) catch return error.OutOfMemory;
+        self.history.append(self.client.allocator, Content{ .role = "model", .parts = model_parts }) catch return error.OutOfMemory;
+    } else {
+        // Invalid response: remove the user turn so it doesn't pollute future requests.
+        _ = self.history.pop();
+    }
 }
 
 /// Send a text message and stream the response (convenience wrapper).
@@ -154,6 +166,24 @@ pub fn sendMessageStream(
 /// Return the full conversation history (user and model turns).
 pub fn getHistory(self: *const Chat) []const Content {
     return self.history.items;
+}
+
+/// Check whether a response contains valid content suitable for history.
+fn validateResponse(response: GenerateContentResponse) bool {
+    const candidates = response.candidates orelse return false;
+    if (candidates.len == 0) return false;
+    const content = candidates[0].content orelse return false;
+    if (content.parts.len == 0) return false;
+    for (content.parts) |part| {
+        if (part.text != null or
+            part.inlineData != null or
+            part.fileData != null or
+            part.functionCall != null or
+            part.functionResponse != null or
+            part.executableCode != null or
+            part.codeExecutionResult != null) return true;
+    }
+    return false;
 }
 
 fn dupeParts(self: *Chat, parts: []const Part) std.mem.Allocator.Error![]Part {
