@@ -240,6 +240,8 @@ pub const Part = struct {
     thought: ?bool = null,
     /// An opaque signature for the thought so it can be reused in subsequent requests.
     thoughtSignature: ?[]const u8 = null,
+    /// Video metadata for video content (frame rate, clipping).
+    videoMetadata: ?VideoMetadata = null,
     /// Media resolution for the input media.
     mediaResolution: ?MediaResolution = null,
     /// Custom metadata associated with the Part.
@@ -509,12 +511,115 @@ pub const CitationMetadata = struct {
     citationSources: ?[]const CitationSource = null,
 };
 
+/// Top candidate tokens with log probabilities at a generation step.
+pub const TopCandidates = struct {
+    /// Sorted by log probability in descending order.
+    candidates: ?[]const TokenLogprob = null,
+};
+
+/// Log probability information for a token.
+pub const TokenLogprob = struct {
+    /// The candidate token string value.
+    token: ?[]const u8 = null,
+    /// The token ID.
+    tokenId: ?i32 = null,
+    /// The log probability of the token.
+    logProbability: ?f64 = null,
+};
+
+/// Log probability results for a candidate.
+pub const LogprobsResult = struct {
+    /// Length = total number of decoding steps. The chosen candidates may or may not
+    /// be in topCandidates.
+    topCandidates: ?[]const TopCandidates = null,
+    /// Length = total number of decoding steps.
+    chosenCandidates: ?[]const TokenLogprob = null,
+};
+
+/// A grounding chunk from a web source.
+pub const GroundingChunkWeb = struct {
+    /// URI reference of the grounding chunk.
+    uri: ?[]const u8 = null,
+    /// Title of the grounding chunk.
+    title: ?[]const u8 = null,
+};
+
+/// A grounding chunk from a retrieved context.
+pub const GroundingChunkRetrievedContext = struct {
+    /// URI reference of the attribution.
+    uri: ?[]const u8 = null,
+    /// Title of the attribution.
+    title: ?[]const u8 = null,
+    /// Text of the attribution.
+    text: ?[]const u8 = null,
+};
+
+/// Grounding chunk — a reference to a source used to ground the response.
+pub const GroundingChunk = struct {
+    /// Grounding chunk from the web.
+    web: ?GroundingChunkWeb = null,
+    /// Grounding chunk from a retrieved context.
+    retrievedContext: ?GroundingChunkRetrievedContext = null,
+};
+
+/// Segment of the content grounded by a supporting reference.
+pub const GroundingSupport = struct {
+    /// Indices into the grounding chunks.
+    groundingChunkIndices: ?[]const i32 = null,
+    /// Confidence scores of the support references (0-1).
+    confidenceScores: ?[]const f64 = null,
+    /// Content of the grounding support segment.
+    segment: ?Segment = null,
+};
+
+/// A segment of content.
+pub const Segment = struct {
+    /// Start index in the response.
+    startIndex: ?i32 = null,
+    /// End index in the response.
+    endIndex: ?i32 = null,
+    /// The text corresponding to the segment.
+    text: ?[]const u8 = null,
+    /// Part index in the response.
+    partIndex: ?i32 = null,
+};
+
+/// Search entry point returned with grounding metadata.
+pub const SearchEntryPoint = struct {
+    /// The rendered search entry point HTML snippet.
+    renderedContent: ?[]const u8 = null,
+    /// Base64 encoded JSON of the search entry point.
+    sdkBlob: ?[]const u8 = null,
+};
+
+/// Metadata about grounding sources used in the response.
+pub const GroundingMetadata = struct {
+    /// List of grounding chunks (supporting references).
+    groundingChunks: ?[]const GroundingChunk = null,
+    /// List of grounding supports.
+    groundingSupports: ?[]const GroundingSupport = null,
+    /// Google search entry point.
+    searchEntryPoint: ?SearchEntryPoint = null,
+    /// Web search queries for follow-up.
+    webSearchQueries: ?[]const []const u8 = null,
+};
+
+/// Video metadata for a video Part.
+pub const VideoMetadata = struct {
+    /// The start offset of the video.
+    startOffset: ?[]const u8 = null,
+    /// The end offset of the video.
+    endOffset: ?[]const u8 = null,
+};
+
 /// A response candidate generated from the model.
 pub const Candidate = struct {
     /// The generated content.
     content: ?Content = null,
     /// The reason why the model stopped generating tokens.
     finishReason: ?FinishReason = null,
+    /// Human-readable message describing why generation stopped.
+    finishMessage: ?[]const u8 = null,
     /// Safety ratings for this candidate.
     safetyRatings: ?[]const SafetyRating = null,
     /// Source attribution of the generated content.
@@ -525,6 +630,18 @@ pub const Candidate = struct {
     avgLogprobs: ?f64 = null,
     /// The index of this candidate.
     index: ?i32 = null,
+    /// Detailed log probability information for the tokens in this candidate.
+    logprobsResult: ?LogprobsResult = null,
+    /// Grounding metadata (sources used when Google Search grounding is enabled).
+    groundingMetadata: ?GroundingMetadata = null,
+};
+
+/// Token count broken down by modality.
+pub const ModalityTokenCount = struct {
+    /// The modality (e.g. "TEXT", "IMAGE", "AUDIO").
+    modality: ?[]const u8 = null,
+    /// The number of tokens for this modality.
+    tokenCount: ?i32 = null,
 };
 
 /// Token usage metadata for a generate content request/response.
@@ -541,6 +658,14 @@ pub const UsageMetadata = struct {
     thoughtsTokenCount: ?i32 = null,
     /// Number of tokens in tool execution results included in the prompt.
     toolUsePromptTokenCount: ?i32 = null,
+    /// Per-modality breakdown of cached content tokens.
+    cacheTokensDetails: ?[]const ModalityTokenCount = null,
+    /// Per-modality breakdown of candidate tokens.
+    candidatesTokensDetails: ?[]const ModalityTokenCount = null,
+    /// Per-modality breakdown of prompt tokens.
+    promptTokensDetails: ?[]const ModalityTokenCount = null,
+    /// Per-modality breakdown of tool use prompt tokens.
+    toolUsePromptTokensDetails: ?[]const ModalityTokenCount = null,
 };
 
 /// Content filter results for a prompt. Only present when no candidates were
