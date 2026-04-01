@@ -286,7 +286,10 @@ pub fn generateContentStream(
 
         if (std.mem.startsWith(u8, trimmed, "data: ")) {
             const json_data = trimmed["data: ".len..];
-            const parsed = std.json.parseFromSlice(GenerateContentResponse, self.allocator, json_data, .{ .ignore_unknown_fields = true }) catch continue;
+            const parsed = std.json.parseFromSlice(GenerateContentResponse, self.allocator, json_data, .{ .ignore_unknown_fields = true }) catch |err| {
+                std.log.err("Gemini streaming: failed to parse SSE chunk: {}", .{err});
+                return error.InvalidSseData;
+            };
             defer parsed.deinit();
             callback(context, parsed.value);
         }
