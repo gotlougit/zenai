@@ -162,6 +162,23 @@ pub const Usage = struct {
     cache_read_input_tokens: ?i32 = null,
 };
 
+/// Policy category that triggered a refusal.
+pub const RefusalCategory = enum {
+    cyber,
+    bio,
+};
+
+/// Structured information about a refusal.
+pub const RefusalStopDetails = struct {
+    /// The policy category that triggered the refusal, or null when it doesn't
+    /// map to a named category.
+    category: ?RefusalCategory = null,
+    /// Human-readable explanation of the refusal, or null when unavailable.
+    explanation: ?[]const u8 = null,
+    /// Always "refusal".
+    type: ?[]const u8 = null,
+};
+
 /// Response from the messages endpoint.
 pub const MessageResponse = struct {
     /// Unique message identifier.
@@ -174,6 +191,8 @@ pub const MessageResponse = struct {
     content: ?[]const ContentBlock = null,
     /// The model used.
     model: ?[]const u8 = null,
+    /// Structured information about a refusal (present when stop_reason is "refusal").
+    stop_details: ?RefusalStopDetails = null,
     /// Why the model stopped generating.
     stop_reason: ?StopReason = null,
     /// Which stop sequence was matched, if any.
@@ -222,6 +241,8 @@ pub const StreamDelta = struct {
     thinking: ?[]const u8 = null,
     /// Incremental signature (for signature_delta).
     signature: ?[]const u8 = null,
+    /// Structured refusal details (for message_delta events).
+    stop_details: ?RefusalStopDetails = null,
     /// Stop reason (for message_delta events).
     stop_reason: ?StopReason = null,
     /// Stop sequence (for message_delta events).
