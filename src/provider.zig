@@ -29,6 +29,38 @@ pub const ToolResult = struct {
     content: []const u8, // String representation of the result
 };
 
+/// Controls how the model uses tools.
+pub const ToolChoice = enum {
+    /// Model decides whether to call tools.
+    auto,
+    /// Model must call at least one tool.
+    any,
+    /// Model must not call tools.
+    none,
+};
+
+/// Response format hint.
+pub const ResponseFormat = enum {
+    /// Default unstructured text.
+    text,
+    /// Model returns valid JSON.
+    json,
+};
+
+/// A content part for multimodal messages.
+pub const ContentPart = union(enum) {
+    text: []const u8,
+    image: ImageData,
+};
+
+/// Inline image data.
+pub const ImageData = struct {
+    /// Base64-encoded image bytes.
+    data: []const u8,
+    /// MIME type, e.g. "image/png", "image/jpeg".
+    mime_type: []const u8,
+};
+
 /// A message role, normalized across providers.
 pub const Role = enum {
     system,
@@ -43,6 +75,9 @@ pub const Message = struct {
     content: ?[]const u8 = null,
     tool_calls: ?[]const ToolCall = null,
     tool_results: ?[]const ToolResult = null,
+    /// Rich content parts (text + images). When set, takes precedence over `content` for
+    /// building provider content blocks. Currently only supported by Gemini.
+    parts: ?[]const ContentPart = null,
 };
 
 /// Minimal generation config — the intersection of what both providers support.
@@ -55,6 +90,8 @@ pub const GenerationConfig = struct {
     presence_penalty: ?f32 = null,
     seed: ?i32 = null,
     tools: ?[]const Tool = null,
+    tool_choice: ?ToolChoice = null,
+    response_format: ?ResponseFormat = null,
 };
 
 /// Unified finish reason.
@@ -160,9 +197,11 @@ pub const Client = union(enum) {
                     .frequencyPenalty = config.frequency_penalty,
                     .presencePenalty = config.presence_penalty,
                     .seed = config.seed,
+                    .responseMimeType = mapResponseFormatToGemini(config.response_format),
                 }, .{
                     .systemInstruction = sys_instruction,
                     .tools = tools,
+                    .toolConfig = mapToolChoiceToGemini(config.tool_choice),
                 });
 
                 var result = GenerateResult.init(g.allocator);
@@ -214,6 +253,8 @@ pub const Client = union(enum) {
                     .presence_penalty = config.presence_penalty,
                     .seed = config.seed,
                     .tools = tools,
+                    .tool_choice = mapToolChoiceToOpenAI(config.tool_choice),
+                    .response_format = mapResponseFormatToOpenAI(config.response_format),
                 });
 
                 var result = GenerateResult.init(o.allocator);
@@ -267,6 +308,8 @@ pub const Client = union(enum) {
                     .top_p = config.top_p,
                     .stop_sequences = config.stop,
                     .tools = tools,
+                    .tool_choice = mapToolChoiceToAnthropic(config.tool_choice),
+                    // Anthropic has no native JSON mode; response_format is ignored.
                 });
 
                 var result = GenerateResult.init(a.allocator);
@@ -332,6 +375,7 @@ pub const Client = union(enum) {
                         defer result.deinit();
                         result.text = response.text();
                         result.finish_reason = mapGeminiFinishReason(response);
+                        result.usage = mapGeminiUsage(response);
                         ctx.user_cb(ctx.user_ctx, result);
                     }
                 };
@@ -344,9 +388,11 @@ pub const Client = union(enum) {
                     .frequencyPenalty = config.frequency_penalty,
                     .presencePenalty = config.presence_penalty,
                     .seed = config.seed,
+                    .responseMimeType = mapResponseFormatToGemini(config.response_format),
                 }, .{
                     .systemInstruction = sys_instruction,
                     .tools = tools,
+                    .toolConfig = mapToolChoiceToGemini(config.tool_choice),
                 }, .{ .user_ctx = context, .user_cb = callback, .alloc = g.allocator }, &Wrapper.wrap);
             },
             .openai => |o| {
@@ -363,6 +409,7 @@ pub const Client = union(enum) {
                         defer result.deinit();
                         result.text = response.text();
                         result.finish_reason = mapOpenAIFinishReason(response);
+                        result.usage = mapOpenAIUsage(response);
                         ctx.user_cb(ctx.user_ctx, result);
                     }
                 };
@@ -376,6 +423,8 @@ pub const Client = union(enum) {
                     .presence_penalty = config.presence_penalty,
                     .seed = config.seed,
                     .tools = tools,
+                    .tool_choice = mapToolChoiceToOpenAI(config.tool_choice),
+                    .response_format = mapResponseFormatToOpenAI(config.response_format),
                 }, .{ .user_ctx = context, .user_cb = callback, .alloc = o.allocator }, &Wrapper.wrap);
             },
             .anthropic => |a| {
@@ -399,6 +448,23 @@ pub const Client = union(enum) {
                         var result = GenerateResult.init(ctx.alloc);
                         defer result.deinit();
                         result.text = text_content;
+                        // Extract finish reason from message_delta events
+                        if (event.delta) |delta| {
+                            if (delta.stop_reason) |reason| {
+                                result.finish_reason = mapAnthropicStopReason(reason);
+                            }
+                        }
+                        // Extract usage from message_delta events
+                        if (event.usage) |usage| {
+                            result.usage = .{
+                                .prompt_tokens = usage.input_tokens,
+                                .completion_tokens = usage.output_tokens,
+                                .total_tokens = if (usage.input_tokens != null and usage.output_tokens != null)
+                                    usage.input_tokens.? + usage.output_tokens.?
+                                else
+                                    null,
+                            };
+                        }
                         ctx.user_cb(ctx.user_ctx, result);
                     }
                 };
@@ -409,6 +475,8 @@ pub const Client = union(enum) {
                     .top_p = config.top_p,
                     .stop_sequences = config.stop,
                     .tools = tools,
+                    .tool_choice = mapToolChoiceToAnthropic(config.tool_choice),
+                    // Anthropic has no native JSON mode; response_format is ignored.
                 }, .{ .user_ctx = context, .user_cb = callback, .alloc = a.allocator }, &Wrapper.wrap);
             },
         }
@@ -479,15 +547,25 @@ const SeparatedMessages = struct {
 };
 
 fn separateSystemMessages(allocator: std.mem.Allocator, messages: []const Message) !SeparatedMessages {
-    var system_text: ?[]const u8 = null;
+    // Collect all system message texts
+    var sys_parts = std.ArrayList([]const u8).init(allocator);
+    defer sys_parts.deinit();
     var non_system_count: usize = 0;
     for (messages) |msg| {
         if (msg.role == .system) {
-            if (system_text == null) system_text = msg.content;
+            if (msg.content) |c| try sys_parts.append(c);
         } else {
             non_system_count += 1;
         }
     }
+
+    // Concatenate all system messages with "\n\n"
+    const system_text: ?[]const u8 = if (sys_parts.items.len == 0)
+        null
+    else if (sys_parts.items.len == 1)
+        sys_parts.items[0] // borrow directly, no allocation
+    else
+        try std.mem.join(allocator, "\n\n", sys_parts.items);
 
     const contents = try allocator.alloc(gemini_types.Content, non_system_count);
     var idx: usize = 0;
@@ -501,7 +579,18 @@ fn separateSystemMessages(allocator: std.mem.Allocator, messages: []const Messag
 
         var parts = std.ArrayList(gemini_types.Part).init(allocator);
 
-        if (msg.content) |c| {
+        if (msg.parts) |content_parts| {
+            // Rich content parts take precedence over plain text content
+            for (content_parts) |cp| {
+                switch (cp) {
+                    .text => |t| try parts.append(.{ .text = t }),
+                    .image => |img| try parts.append(.{ .inlineData = .{
+                        .data = img.data,
+                        .mimeType = img.mime_type,
+                    } }),
+                }
+            }
+        } else if (msg.content) |c| {
             try parts.append(.{ .text = c });
         }
 
@@ -588,6 +677,19 @@ fn messagesToOpenAIMessages(allocator: std.mem.Allocator, messages: []const Mess
             oai_tool_calls = oai_calls;
         }
 
+        // Extract text content: parts take precedence over content
+        const text_content: ?[]const u8 = if (msg.parts) |content_parts| blk: {
+            // Use first text part (OpenAI content field is a single string;
+            // image parts are not yet supported in the OpenAI abstraction)
+            for (content_parts) |cp| {
+                switch (cp) {
+                    .text => |t| break :blk t,
+                    .image => {},
+                }
+            }
+            break :blk null;
+        } else msg.content;
+
         try out.append(.{
             .role = switch (msg.role) {
                 .system => .system,
@@ -595,7 +697,7 @@ fn messagesToOpenAIMessages(allocator: std.mem.Allocator, messages: []const Mess
                 .assistant => .assistant,
                 .tool => unreachable,
             },
-            .content = msg.content,
+            .content = text_content,
             .tool_calls = oai_tool_calls,
         });
     }
@@ -610,7 +712,15 @@ fn messagesToAnthropicMessages(allocator: std.mem.Allocator, messages: []const M
 
         var blocks = std.ArrayList(anthropic_types.ContentBlockParam).init(allocator);
 
-        if (msg.content) |c| {
+        if (msg.parts) |content_parts| {
+            // Rich content parts: only text is supported for Anthropic currently
+            for (content_parts) |cp| {
+                switch (cp) {
+                    .text => |t| try blocks.append(.{ .type = "text", .text = t }),
+                    .image => {},
+                }
+            }
+        } else if (msg.content) |c| {
             try blocks.append(.{ .type = "text", .text = c });
         }
 
@@ -750,6 +860,49 @@ fn jsonValueToGeminiSchema(allocator: std.mem.Allocator, val: std.json.Value) !g
     return schema;
 }
 
+fn mapToolChoiceToGemini(choice: ?ToolChoice) ?gemini_types.ToolConfig {
+    const tc = choice orelse return null;
+    return .{ .functionCallingConfig = .{ .mode = switch (tc) {
+        .auto => .AUTO,
+        .any => .ANY,
+        .none => .NONE,
+    } } };
+}
+
+fn mapToolChoiceToOpenAI(choice: ?ToolChoice) ?[]const u8 {
+    const tc = choice orelse return null;
+    return switch (tc) {
+        .auto => "auto",
+        .any => "required",
+        .none => "none",
+    };
+}
+
+fn mapToolChoiceToAnthropic(choice: ?ToolChoice) ?anthropic_types.ToolChoice {
+    const tc = choice orelse return null;
+    return .{ .type = switch (tc) {
+        .auto => "auto",
+        .any => "any",
+        .none => "none",
+    } };
+}
+
+fn mapResponseFormatToGemini(fmt: ?ResponseFormat) ?[]const u8 {
+    const f = fmt orelse return null;
+    return switch (f) {
+        .json => "application/json",
+        .text => null,
+    };
+}
+
+fn mapResponseFormatToOpenAI(fmt: ?ResponseFormat) ?openai_types.ResponseFormat {
+    const f = fmt orelse return null;
+    return switch (f) {
+        .json => .{ .type = "json_object" },
+        .text => null,
+    };
+}
+
 fn mapGeminiFinishReason(response: gemini_types.GenerateContentResponse) FinishReason {
     const candidates = response.candidates orelse return .unknown;
     if (candidates.len == 0) return .unknown;
@@ -793,14 +946,18 @@ fn mapOpenAIUsage(response: openai_types.ChatCompletionResponse) Usage {
     };
 }
 
-fn mapAnthropicFinishReason(response: anthropic_types.MessageResponse) FinishReason {
-    const reason = response.stop_reason orelse return .unknown;
+fn mapAnthropicStopReason(reason: anthropic_types.StopReason) FinishReason {
     return switch (reason) {
         .end_turn, .stop_sequence => .stop,
         .max_tokens, .pause_turn => .max_tokens,
         .tool_use => .tool_call,
         .refusal => .safety,
     };
+}
+
+fn mapAnthropicFinishReason(response: anthropic_types.MessageResponse) FinishReason {
+    const reason = response.stop_reason orelse return .unknown;
+    return mapAnthropicStopReason(reason);
 }
 
 fn mapAnthropicUsage(response: anthropic_types.MessageResponse) Usage {
