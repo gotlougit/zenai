@@ -214,14 +214,18 @@ pub const Client = union(enum) {
                 if (response.value.candidates) |candidates| {
                     if (candidates.len > 0) {
                         if (candidates[0].content) |content| {
-                            var tool_calls = std.ArrayList(ToolCall).init(result.arena.allocator());
+                            var tool_calls: std.ArrayList(ToolCall) = .empty;
                             for (content.parts) |p| {
                                 if (p.functionCall) |fc| {
                                     var args_str: []const u8 = "";
                                     if (fc.args) |args_val| {
-                                        args_str = try std.json.stringifyAlloc(result.arena.allocator(), args_val, .{});
+                                        args_str = blk: {
+                                            var aw: std.Io.Writer.Allocating = .init(result.arena.allocator());
+                                            try std.json.Stringify.value(args_val, .{}, &aw.writer);
+                                            break :blk aw.written();
+                                        };
                                     }
-                                    try tool_calls.append(.{
+                                    try tool_calls.append(result.arena.allocator(), .{
                                         .id = if (fc.id) |id| try result.arena.allocator().dupe(u8, id) else "",
                                         .name = if (fc.name) |n| try result.arena.allocator().dupe(u8, n) else "",
                                         .arguments = args_str,
@@ -229,7 +233,7 @@ pub const Client = union(enum) {
                                 }
                             }
                             if (tool_calls.items.len > 0) {
-                                result.tool_calls = try tool_calls.toOwnedSlice();
+                                result.tool_calls = try tool_calls.toOwnedSlice(result.arena.allocator());
                             }
                         }
                     }
@@ -268,10 +272,10 @@ pub const Client = union(enum) {
                     if (choices.len > 0) {
                         if (choices[0].message) |msg| {
                             if (msg.tool_calls) |calls| {
-                                var tool_calls = std.ArrayList(ToolCall).init(result.arena.allocator());
+                                var tool_calls: std.ArrayList(ToolCall) = .empty;
                                 for (calls) |call| {
                                     if (call.function) |f| {
-                                        try tool_calls.append(.{
+                                        try tool_calls.append(result.arena.allocator(), .{
                                             .id = if (call.id) |id| try result.arena.allocator().dupe(u8, id) else "",
                                             .name = if (f.name) |n| try result.arena.allocator().dupe(u8, n) else "",
                                             .arguments = if (f.arguments) |a| try result.arena.allocator().dupe(u8, a) else "",
@@ -279,7 +283,7 @@ pub const Client = union(enum) {
                                     }
                                 }
                                 if (tool_calls.items.len > 0) {
-                                    result.tool_calls = try tool_calls.toOwnedSlice();
+                                    result.tool_calls = try tool_calls.toOwnedSlice(result.arena.allocator());
                                 }
                             }
                         }
@@ -320,15 +324,19 @@ pub const Client = union(enum) {
                 result.usage = mapAnthropicUsage(response.value);
 
                 if (response.value.content) |blocks| {
-                    var tool_calls = std.ArrayList(ToolCall).init(result.arena.allocator());
+                    var tool_calls = std.ArrayList(ToolCall){};
                     for (blocks) |block| {
                         if (block.type) |t| {
                             if (std.mem.eql(u8, t, "tool_use")) {
                                 var args_str: []const u8 = "";
                                 if (block.input) |input_val| {
-                                    args_str = try std.json.stringifyAlloc(result.arena.allocator(), input_val, .{});
+                                    args_str = blk: {
+                                        var aw: std.Io.Writer.Allocating = .init(result.arena.allocator());
+                                        try std.json.Stringify.value(input_val, .{}, &aw.writer);
+                                        break :blk aw.written();
+                                    };
                                 }
-                                try tool_calls.append(.{
+                                try tool_calls.append(result.arena.allocator(), .{
                                     .id = if (block.id) |id| try result.arena.allocator().dupe(u8, id) else "",
                                     .name = if (block.name) |n| try result.arena.allocator().dupe(u8, n) else "",
                                     .arguments = args_str,
@@ -337,7 +345,7 @@ pub const Client = union(enum) {
                         }
                     }
                     if (tool_calls.items.len > 0) {
-                        result.tool_calls = try tool_calls.toOwnedSlice();
+                        result.tool_calls = try tool_calls.toOwnedSlice(result.arena.allocator());
                     }
                 }
                 return result;
@@ -548,12 +556,12 @@ const SeparatedMessages = struct {
 
 fn separateSystemMessages(allocator: std.mem.Allocator, messages: []const Message) !SeparatedMessages {
     // Collect all system message texts
-    var sys_parts = std.ArrayList([]const u8).init(allocator);
-    defer sys_parts.deinit();
+    var sys_parts: std.ArrayList([]const u8) = .empty;
+    defer sys_parts.deinit(allocator);
     var non_system_count: usize = 0;
     for (messages) |msg| {
         if (msg.role == .system) {
-            if (msg.content) |c| try sys_parts.append(c);
+            if (msg.content) |c| try sys_parts.append(allocator, c);
         } else {
             non_system_count += 1;
         }
@@ -577,21 +585,20 @@ fn separateSystemMessages(allocator: std.mem.Allocator, messages: []const Messag
             .system => unreachable,
         };
 
-        var parts = std.ArrayList(gemini_types.Part).init(allocator);
+        var parts: std.ArrayList(gemini_types.Part) = .empty;
 
         if (msg.parts) |content_parts| {
-            // Rich content parts take precedence over plain text content
             for (content_parts) |cp| {
                 switch (cp) {
-                    .text => |t| try parts.append(.{ .text = t }),
-                    .image => |img| try parts.append(.{ .inlineData = .{
+                    .text => |t| try parts.append(allocator, .{ .text = t }),
+                    .image => |img| try parts.append(allocator, .{ .inlineData = .{
                         .data = img.data,
                         .mimeType = img.mime_type,
                     } }),
                 }
             }
         } else if (msg.content) |c| {
-            try parts.append(.{ .text = c });
+            try parts.append(allocator, .{ .text = c });
         }
 
         if (msg.tool_calls) |calls| {
@@ -601,7 +608,7 @@ fn separateSystemMessages(allocator: std.mem.Allocator, messages: []const Messag
                     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, call.arguments, .{});
                     args = parsed.value;
                 }
-                try parts.append(.{
+                try parts.append(allocator, .{
                     .functionCall = .{
                         .id = call.id,
                         .name = call.name,
@@ -622,7 +629,7 @@ fn separateSystemMessages(allocator: std.mem.Allocator, messages: []const Messag
                         response_val = std.json.Value{ .string = res.content };
                     }
                 }
-                try parts.append(.{
+                try parts.append(allocator, .{
                     .functionResponse = .{
                         .id = res.id,
                         .name = res.name,
@@ -632,7 +639,7 @@ fn separateSystemMessages(allocator: std.mem.Allocator, messages: []const Messag
             }
         }
 
-        contents[idx] = .{ .role = role, .parts = try parts.toOwnedSlice() };
+        contents[idx] = .{ .role = role, .parts = try parts.toOwnedSlice(allocator) };
         idx += 1;
     }
 
@@ -640,20 +647,20 @@ fn separateSystemMessages(allocator: std.mem.Allocator, messages: []const Messag
 }
 
 fn messagesToOpenAIMessages(allocator: std.mem.Allocator, messages: []const Message) ![]openai_types.Message {
-    var out = std.ArrayList(openai_types.Message).init(allocator);
+    var out: std.ArrayList(openai_types.Message) = .empty;
 
     for (messages) |msg| {
         if (msg.role == .tool) {
             if (msg.tool_results) |results| {
                 for (results) |res| {
-                    try out.append(.{
+                    try out.append(allocator, .{
                         .role = .tool,
                         .content = res.content,
                         .tool_call_id = res.id,
                     });
                 }
             } else {
-                try out.append(.{
+                try out.append(allocator, .{
                     .role = .tool,
                     .content = msg.content,
                 });
@@ -677,10 +684,7 @@ fn messagesToOpenAIMessages(allocator: std.mem.Allocator, messages: []const Mess
             oai_tool_calls = oai_calls;
         }
 
-        // Extract text content: parts take precedence over content
         const text_content: ?[]const u8 = if (msg.parts) |content_parts| blk: {
-            // Use first text part (OpenAI content field is a single string;
-            // image parts are not yet supported in the OpenAI abstraction)
             for (content_parts) |cp| {
                 switch (cp) {
                     .text => |t| break :blk t,
@@ -690,7 +694,7 @@ fn messagesToOpenAIMessages(allocator: std.mem.Allocator, messages: []const Mess
             break :blk null;
         } else msg.content;
 
-        try out.append(.{
+        try out.append(allocator, .{
             .role = switch (msg.role) {
                 .system => .system,
                 .user => .user,
@@ -702,26 +706,25 @@ fn messagesToOpenAIMessages(allocator: std.mem.Allocator, messages: []const Mess
         });
     }
 
-    return out.toOwnedSlice();
+    return out.toOwnedSlice(allocator);
 }
 
 fn messagesToAnthropicMessages(allocator: std.mem.Allocator, messages: []const Message) ![]anthropic_types.MessageParam {
-    var out = std.ArrayList(anthropic_types.MessageParam).init(allocator);
+    var out: std.ArrayList(anthropic_types.MessageParam) = .empty;
     for (messages) |msg| {
         if (msg.role == .system) continue;
 
-        var blocks = std.ArrayList(anthropic_types.ContentBlockParam).init(allocator);
+        var blocks: std.ArrayList(anthropic_types.ContentBlockParam) = .empty;
 
         if (msg.parts) |content_parts| {
-            // Rich content parts: only text is supported for Anthropic currently
             for (content_parts) |cp| {
                 switch (cp) {
-                    .text => |t| try blocks.append(.{ .type = "text", .text = t }),
+                    .text => |t| try blocks.append(allocator, .{ .type = "text", .text = t }),
                     .image => {},
                 }
             }
         } else if (msg.content) |c| {
-            try blocks.append(.{ .type = "text", .text = c });
+            try blocks.append(allocator, .{ .type = "text", .text = c });
         }
 
         if (msg.tool_calls) |calls| {
@@ -731,7 +734,7 @@ fn messagesToAnthropicMessages(allocator: std.mem.Allocator, messages: []const M
                     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, call.arguments, .{});
                     input_val = parsed.value;
                 }
-                try blocks.append(.{
+                try blocks.append(allocator, .{
                     .type = "tool_use",
                     .id = call.id,
                     .name = call.name,
@@ -742,7 +745,7 @@ fn messagesToAnthropicMessages(allocator: std.mem.Allocator, messages: []const M
 
         if (msg.tool_results) |results| {
             for (results) |res| {
-                try blocks.append(.{
+                try blocks.append(allocator, .{
                     .type = "tool_result",
                     .tool_use_id = res.id,
                     .content = res.content,
@@ -751,9 +754,9 @@ fn messagesToAnthropicMessages(allocator: std.mem.Allocator, messages: []const M
         }
 
         const role: anthropic_types.Role = if (msg.role == .assistant) .assistant else .user;
-        try out.append(.{ .role = role, .content = try blocks.toOwnedSlice() });
+        try out.append(allocator, .{ .role = role, .content = try blocks.toOwnedSlice(allocator) });
     }
-    return out.toOwnedSlice();
+    return out.toOwnedSlice(allocator);
 }
 
 fn mapOpenAITools(allocator: std.mem.Allocator, tools: []const Tool) ![]openai_types.Tool {
