@@ -589,14 +589,15 @@ pub const Client = union(enum) {
     /// tool calls via the handler, send results back, repeat until the LLM
     /// responds with text (or max_turns is reached).
     ///
-    /// The caller owns `messages` — on return it will contain all assistant
-    /// and tool messages appended during the loop. Message data is duped into
-    /// `msg_alloc` so it outlives individual LLM responses.
+    /// The caller owns `messages`. `list_alloc` is used to grow the messages
+    /// ArrayList (must match the allocator used to create it). `data_alloc`
+    /// is used to dupe message content strings so they outlive LLM responses.
     pub fn runTools(
         self: Client,
         model: []const u8,
         messages: *std.ArrayListUnmanaged(Message),
-        msg_alloc: std.mem.Allocator,
+        list_alloc: std.mem.Allocator,
+        data_alloc: std.mem.Allocator,
         handler: ToolHandler,
         config: RunToolsConfig,
     ) Error!RunToolsResult {
@@ -619,10 +620,10 @@ pub const Client = union(enum) {
             // Handle tool calls
             if (gen_result.tool_calls) |tool_calls| {
                 // Append assistant message with tool calls
-                const duped_calls = try dupeToolCallSlice(msg_alloc, tool_calls);
-                try messages.append(msg_alloc, .{
+                const duped_calls = try dupeToolCallSlice(data_alloc, tool_calls);
+                try messages.append(list_alloc, .{
                     .role = .assistant,
-                    .content = if (gen_result.text) |t| try msg_alloc.dupe(u8, t) else null,
+                    .content = if (gen_result.text) |t| try data_alloc.dupe(u8, t) else null,
                     .tool_calls = duped_calls,
                 });
 
@@ -634,10 +635,10 @@ pub const Client = union(enum) {
 
                     const tool_result = handler.call(tool_arena.allocator(), tc.name, tc.arguments);
 
-                    try tool_results.append(msg_alloc, .{
-                        .id = try msg_alloc.dupe(u8, tc.id),
-                        .name = try msg_alloc.dupe(u8, tc.name),
-                        .content = try msg_alloc.dupe(u8, tool_result),
+                    try tool_results.append(data_alloc, .{
+                        .id = try data_alloc.dupe(u8, tc.id),
+                        .name = try data_alloc.dupe(u8, tc.name),
+                        .content = try data_alloc.dupe(u8, tool_result),
                     });
 
                     try all_tool_calls.append(ra, .{
@@ -648,19 +649,19 @@ pub const Client = union(enum) {
                 }
 
                 // Append tool results message
-                try messages.append(msg_alloc, .{
+                try messages.append(list_alloc, .{
                     .role = .tool,
-                    .tool_results = try tool_results.toOwnedSlice(msg_alloc),
+                    .tool_results = try tool_results.toOwnedSlice(data_alloc),
                 });
 
                 continue;
             }
 
             // Text response — we're done
-            const text = if (gen_result.text) |t| try msg_alloc.dupe(u8, t) else null;
+            const text = if (gen_result.text) |t| try data_alloc.dupe(u8, t) else null;
 
             if (text != null) {
-                try messages.append(msg_alloc, .{
+                try messages.append(list_alloc, .{
                     .role = .assistant,
                     .content = text,
                 });
