@@ -116,19 +116,8 @@ pub const GenerateResult = struct {
     tool_calls: ?[]const ToolCall = null,
     finish_reason: FinishReason = .unknown,
     usage: Usage = .{},
-    /// We use an ArenaAllocator to safely manage dynamic strings and tool_call
-    /// slices created when normalizing provider responses.
+    /// ArenaAllocator owns all dynamic strings and tool_call slices.
     arena: std.heap.ArenaAllocator,
-    /// Backing memory for owned text — null when text borrows from Response.
-    _owned_text: ?[]u8 = null,
-    /// Provider response backing memory.
-    _gemini_response: ?GeminiResponse = null,
-    _openai_response: ?OpenAIResponse = null,
-    _anthropic_response: ?AnthropicResponse = null,
-
-    const GeminiResponse = http.Response(gemini_types.GenerateContentResponse);
-    const OpenAIResponse = http.Response(openai_types.ChatCompletionResponse);
-    const AnthropicResponse = http.Response(anthropic_types.MessageResponse);
 
     pub fn init(allocator: std.mem.Allocator) GenerateResult {
         return .{
@@ -137,9 +126,6 @@ pub const GenerateResult = struct {
     }
 
     pub fn deinit(self: *GenerateResult) void {
-        if (self._gemini_response) |*r| r.deinit();
-        if (self._openai_response) |*r| r.deinit();
-        if (self._anthropic_response) |*r| r.deinit();
         self.arena.deinit();
     }
 };
@@ -147,12 +133,17 @@ pub const GenerateResult = struct {
 /// Unified embedding result.
 pub const EmbedResult = struct {
     values: ?[]const f32 = null,
-    _gemini_response: ?http.Response(gemini_types.EmbedContentResponse) = null,
-    _openai_response: ?http.Response(openai_types.EmbeddingResponse) = null,
+    /// ArenaAllocator owns the duped values slice.
+    arena: std.heap.ArenaAllocator,
+
+    pub fn init(allocator: std.mem.Allocator) EmbedResult {
+        return .{
+            .arena = std.heap.ArenaAllocator.init(allocator),
+        };
+    }
 
     pub fn deinit(self: *EmbedResult) void {
-        if (self._gemini_response) |*r| r.deinit();
-        if (self._openai_response) |*r| r.deinit();
+        self.arena.deinit();
     }
 };
 
@@ -189,7 +180,7 @@ pub const Client = union(enum) {
 
                 const tools = if (config.tools) |t| try mapGeminiTools(req_alloc, t) else null;
 
-                const response = try g.generateContent(model, contents, gemini_types.GenerationConfig{
+                var response = try g.generateContent(model, contents, gemini_types.GenerationConfig{
                     .temperature = config.temperature,
                     .maxOutputTokens = config.max_tokens,
                     .topP = config.top_p,
@@ -203,11 +194,13 @@ pub const Client = union(enum) {
                     .tools = tools,
                     .toolConfig = mapToolChoiceToGemini(config.tool_choice),
                 });
+                defer response.deinit();
 
                 var result = GenerateResult.init(g.allocator);
                 errdefer result.deinit();
-                result._gemini_response = response;
-                result.text = response.value.text();
+                if (response.value.text()) |t| {
+                    result.text = try result.arena.allocator().dupe(u8, t);
+                }
                 result.finish_reason = mapGeminiFinishReason(response.value);
                 result.usage = mapGeminiUsage(response.value);
 
@@ -248,7 +241,7 @@ pub const Client = union(enum) {
                 const oai_messages = try messagesToOpenAIMessages(req_alloc, messages);
                 const tools = if (config.tools) |t| try mapOpenAITools(req_alloc, t) else null;
 
-                const response = try o.chatCompletion(model, oai_messages, .{
+                var response = try o.chatCompletion(model, oai_messages, .{
                     .temperature = config.temperature,
                     .max_tokens = config.max_tokens,
                     .top_p = config.top_p,
@@ -260,11 +253,13 @@ pub const Client = union(enum) {
                     .tool_choice = mapToolChoiceToOpenAI(config.tool_choice),
                     .response_format = mapResponseFormatToOpenAI(config.response_format),
                 });
+                defer response.deinit();
 
                 var result = GenerateResult.init(o.allocator);
                 errdefer result.deinit();
-                result._openai_response = response;
-                result.text = response.value.text();
+                if (response.value.text()) |t| {
+                    result.text = try result.arena.allocator().dupe(u8, t);
+                }
                 result.finish_reason = mapOpenAIFinishReason(response.value);
                 result.usage = mapOpenAIUsage(response.value);
 
@@ -306,7 +301,7 @@ pub const Client = union(enum) {
 
                 const tools = if (config.tools) |t| try mapAnthropicTools(req_alloc, t) else null;
 
-                const response = try a.createMessage(model, ant_messages, config.max_tokens orelse 4096, .{
+                var response = try a.createMessage(model, ant_messages, config.max_tokens orelse 4096, .{
                     .system = system_blocks,
                     .temperature = config.temperature,
                     .top_p = config.top_p,
@@ -315,11 +310,13 @@ pub const Client = union(enum) {
                     .tool_choice = mapToolChoiceToAnthropic(config.tool_choice),
                     // Anthropic has no native JSON mode; response_format is ignored.
                 });
+                defer response.deinit();
 
                 var result = GenerateResult.init(a.allocator);
                 errdefer result.deinit();
-                result._anthropic_response = response;
-                result.text = response.value.text();
+                if (response.value.text()) |t| {
+                    result.text = try result.arena.allocator().dupe(u8, t);
+                }
                 result.finish_reason = mapAnthropicFinishReason(response.value);
                 result.usage = mapAnthropicUsage(response.value);
 
@@ -498,23 +495,28 @@ pub const Client = union(enum) {
     ) Error!EmbedResult {
         switch (self) {
             .gemini => |g| {
-                const response = try g.embedText(model, text);
-                const values = if (response.value.embedding) |e| e.values else null;
-                return EmbedResult{
-                    .values = values,
-                    ._gemini_response = response,
-                };
+                var response = try g.embedText(model, text);
+                defer response.deinit();
+                var result = EmbedResult.init(g.allocator);
+                if (response.value.embedding) |e| {
+                    if (e.values) |v| {
+                        result.values = try result.arena.allocator().dupe(f32, v);
+                    }
+                }
+                return result;
             },
             .openai => |o| {
-                const response = try o.embedText(model, text);
-                const values = if (response.value.data) |data|
-                    if (data.len > 0) data[0].embedding else null
-                else
-                    null;
-                return EmbedResult{
-                    .values = values,
-                    ._openai_response = response,
-                };
+                var response = try o.embedText(model, text);
+                defer response.deinit();
+                var result = EmbedResult.init(o.allocator);
+                if (response.value.data) |data| {
+                    if (data.len > 0) {
+                        if (data[0].embedding) |v| {
+                            result.values = try result.arena.allocator().dupe(f32, v);
+                        }
+                    }
+                }
+                return result;
             },
             .anthropic => {
                 return error.ApiError;

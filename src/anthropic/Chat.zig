@@ -18,7 +18,7 @@ model: []const u8,
 max_tokens: i32,
 config: Client.MessageConfig,
 history: std.ArrayListUnmanaged(MessageParam),
-responses: std.ArrayListUnmanaged(Client.Response(MessageResponse)),
+last_response: ?Client.Response(MessageResponse) = null,
 arena: std.heap.ArenaAllocator,
 
 /// Create a new chat session with the given model and configuration.
@@ -34,7 +34,6 @@ pub fn init(
         .max_tokens = max_tokens,
         .config = config,
         .history = .empty,
-        .responses = .empty,
         .arena = std.heap.ArenaAllocator.init(client.allocator),
     };
 }
@@ -42,15 +41,16 @@ pub fn init(
 /// Release all resources: conversation history, responses, and owned strings.
 pub fn deinit(self: *Chat) void {
     self.history.deinit(self.client.allocator);
-
-    for (self.responses.items) |*resp| resp.deinit();
-    self.responses.deinit(self.client.allocator);
-
+    if (self.last_response) |*r| r.deinit();
     self.arena.deinit();
 }
 
 /// Send content blocks as a user message.
+/// The returned response is valid until the next `send()` or `deinit()` call.
 pub fn send(self: *Chat, user_content: []const ContentBlockParam) Client.ApiError!MessageResponse {
+    if (self.last_response) |*r| r.deinit();
+    self.last_response = null;
+
     const owned = try self.dupeContentBlocks(user_content);
     try self.history.append(self.client.allocator, MessageParam{ .role = .user, .content = owned });
 
@@ -69,8 +69,6 @@ pub fn send(self: *Chat, user_content: []const ContentBlockParam) Client.ApiErro
         _ = self.history.pop();
     }
 
-    try self.responses.append(self.client.allocator, response);
-
     if (validateResponse(response.value)) {
         // Convert response content blocks to request content block params for history
         const assistant_content = try self.responseToContentBlocks(response.value);
@@ -79,6 +77,7 @@ pub fn send(self: *Chat, user_content: []const ContentBlockParam) Client.ApiErro
         _ = self.history.pop();
     }
 
+    self.last_response = response;
     return response.value;
 }
 

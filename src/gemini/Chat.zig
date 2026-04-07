@@ -18,7 +18,7 @@ model: []const u8,
 config: ?GenerationConfig,
 options: Client.RequestOptions,
 history: std.ArrayListUnmanaged(Content),
-responses: std.ArrayListUnmanaged(Client.Response(GenerateContentResponse)),
+last_response: ?Client.Response(GenerateContentResponse) = null,
 arena: std.heap.ArenaAllocator,
 
 /// Create a new chat session with the given model and configuration.
@@ -34,7 +34,6 @@ pub fn init(
         .config = config,
         .options = options,
         .history = .empty,
-        .responses = .empty,
         .arena = std.heap.ArenaAllocator.init(client.allocator),
     };
 }
@@ -42,15 +41,16 @@ pub fn init(
 /// Release all resources: conversation history, response arenas, and owned strings.
 pub fn deinit(self: *Chat) void {
     self.history.deinit(self.client.allocator);
-
-    for (self.responses.items) |*resp| resp.deinit();
-    self.responses.deinit(self.client.allocator);
-
+    if (self.last_response) |*r| r.deinit();
     self.arena.deinit();
 }
 
 /// Send a multimodal message (text, images, files, function responses, etc.).
+/// The returned response is valid until the next `send()` or `deinit()` call.
 pub fn send(self: *Chat, user_parts: []const Part) Client.ApiError!GenerateContentResponse {
+    if (self.last_response) |*r| r.deinit();
+    self.last_response = null;
+
     const owned = try self.dupeParts(user_parts);
     try self.history.append(self.client.allocator, Content{ .role = "user", .parts = owned });
 
@@ -69,15 +69,15 @@ pub fn send(self: *Chat, user_parts: []const Part) Client.ApiError!GenerateConte
         _ = self.history.pop();
     }
 
-    try self.responses.append(self.client.allocator, response);
-
     if (validateResponse(response.value)) {
-        try self.history.append(self.client.allocator, response.value.candidates.?[0].content.?);
+        const model_content = response.value.candidates.?[0].content.?;
+        const owned_parts = try self.dupeParts(model_content.parts);
+        try self.history.append(self.client.allocator, Content{ .role = model_content.role, .parts = owned_parts });
     } else {
-        // Invalid response: remove the user turn so it doesn't pollute future requests.
         _ = self.history.pop();
     }
 
+    self.last_response = response;
     return response.value;
 }
 

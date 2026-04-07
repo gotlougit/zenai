@@ -14,7 +14,7 @@ client: *Client,
 model: []const u8,
 config: Client.ChatCompletionConfig,
 history: std.ArrayListUnmanaged(Message),
-responses: std.ArrayListUnmanaged(Client.Response(ChatCompletionResponse)),
+last_response: ?Client.Response(ChatCompletionResponse) = null,
 arena: std.heap.ArenaAllocator,
 
 /// Create a new chat session with the given model and configuration.
@@ -28,7 +28,6 @@ pub fn init(
         .model = model,
         .config = config,
         .history = .empty,
-        .responses = .empty,
         .arena = std.heap.ArenaAllocator.init(client.allocator),
     };
 }
@@ -36,15 +35,16 @@ pub fn init(
 /// Release all resources: conversation history, responses, and owned strings.
 pub fn deinit(self: *Chat) void {
     self.history.deinit(self.client.allocator);
-
-    for (self.responses.items) |*resp| resp.deinit();
-    self.responses.deinit(self.client.allocator);
-
+    if (self.last_response) |*r| r.deinit();
     self.arena.deinit();
 }
 
 /// Send a message with the given role and content.
+/// The returned response is valid until the next `send()` or `deinit()` call.
 pub fn send(self: *Chat, user_messages: []const Message) Client.ApiError!ChatCompletionResponse {
+    if (self.last_response) |*r| r.deinit();
+    self.last_response = null;
+
     for (user_messages) |msg| {
         const owned = try self.dupeMessage(msg);
         try self.history.append(self.client.allocator, owned);
@@ -65,15 +65,15 @@ pub fn send(self: *Chat, user_messages: []const Message) Client.ApiError!ChatCom
         self.history.shrinkRetainingCapacity(self.history.items.len - user_messages.len);
     }
 
-    try self.responses.append(self.client.allocator, response);
-
     if (validateResponse(response.value)) {
-        try self.history.append(self.client.allocator, response.value.choices.?[0].message.?);
+        const owned_msg = try self.dupeMessage(response.value.choices.?[0].message.?);
+        try self.history.append(self.client.allocator, owned_msg);
     } else {
         // Invalid response: remove user messages so they don't pollute future requests.
         self.history.shrinkRetainingCapacity(self.history.items.len - user_messages.len);
     }
 
+    self.last_response = response;
     return response.value;
 }
 
