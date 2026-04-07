@@ -624,9 +624,18 @@ fn separateSystemMessages(allocator: std.mem.Allocator, messages: []const Messag
                 if (res.content.len > 0) {
                     const parsed = std.json.parseFromSlice(std.json.Value, allocator, res.content, .{}) catch null;
                     if (parsed) |p| {
-                        response_val = p.value;
+                        // Gemini requires response to be a JSON object (Struct)
+                        if (p.value == .object) {
+                            response_val = p.value;
+                        } else {
+                            var obj = std.json.ObjectMap.init(allocator);
+                            try obj.put("result", p.value);
+                            response_val = std.json.Value{ .object = obj };
+                        }
                     } else {
-                        response_val = std.json.Value{ .string = res.content };
+                        var obj = std.json.ObjectMap.init(allocator);
+                        try obj.put("result", std.json.Value{ .string = res.content });
+                        response_val = std.json.Value{ .object = obj };
                     }
                 }
                 try parts.append(allocator, .{
