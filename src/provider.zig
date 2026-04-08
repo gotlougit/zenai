@@ -20,12 +20,16 @@ pub const ToolCall = struct {
     name: []const u8,
     /// JSON string of the arguments.
     arguments: []const u8,
+    /// Gemini thought signature — must be echoed back with the tool result.
+    thought_signature: ?[]const u8 = null,
 };
 
 pub const ToolResult = struct {
     id: []const u8,
     name: []const u8, // Required specifically by Gemini
     content: []const u8, // String representation of the result
+    /// Gemini thought signature — echoed from the corresponding ToolCall.
+    thought_signature: ?[]const u8 = null,
 };
 
 /// Controls how the model uses tools.
@@ -222,6 +226,7 @@ pub const Client = union(enum) {
                                         .id = if (fc.id) |id| try result.arena.allocator().dupe(u8, id) else "",
                                         .name = if (fc.name) |n| try result.arena.allocator().dupe(u8, n) else "",
                                         .arguments = args_str,
+                                        .thought_signature = if (p.thoughtSignature) |ts| try result.arena.allocator().dupe(u8, ts) else null,
                                     });
                                 }
                             }
@@ -617,6 +622,7 @@ pub const Client = union(enum) {
                         .id = try data_alloc.dupe(u8, tc.id),
                         .name = try data_alloc.dupe(u8, tc.name),
                         .content = try data_alloc.dupe(u8, tool_result),
+                        .thought_signature = if (tc.thought_signature) |ts| try data_alloc.dupe(u8, ts) else null,
                     });
 
                     try all_tool_calls.append(ra, .{
@@ -667,6 +673,7 @@ pub const Client = union(enum) {
                 .id = try alloc.dupe(u8, tc.id),
                 .name = try alloc.dupe(u8, tc.name),
                 .arguments = try alloc.dupe(u8, tc.arguments),
+                .thought_signature = if (tc.thought_signature) |ts| try alloc.dupe(u8, ts) else null,
             };
         }
         return duped;
@@ -740,6 +747,7 @@ fn separateSystemMessages(allocator: std.mem.Allocator, messages: []const Messag
                         .name = call.name,
                         .args = args,
                     },
+                    .thoughtSignature = call.thought_signature,
                 });
             }
         }
@@ -770,6 +778,7 @@ fn separateSystemMessages(allocator: std.mem.Allocator, messages: []const Messag
                         .name = res.name,
                         .response = response_val,
                     },
+                    .thoughtSignature = res.thought_signature,
                 });
             }
         }
