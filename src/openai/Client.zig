@@ -138,21 +138,6 @@ fn fetchPost(self: *Client, url: []const u8, body: anytype, comptime T: type) Ap
     return .{ .value = parsed.value, .json_buf = response_buf, .parsed = parsed };
 }
 
-fn fetchDelete(self: *Client, url: []const u8) ApiError!void {
-    const auth = self.authHeaders();
-    const result = try self.http_client.fetch(.{
-        .location = .{ .url = url },
-        .method = .DELETE,
-        .extra_headers = &auth,
-    });
-
-    const status_code: u10 = @intFromEnum(result.status);
-    if (status_code < 200 or status_code >= 300) {
-        self.setErrorDetail(status_code, "");
-        return error.ApiError;
-    }
-}
-
 // --- Chat Completions ---
 
 /// Configuration for chat completion requests.

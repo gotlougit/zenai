@@ -5,7 +5,6 @@ const anthropic_mod = @import("anthropic/Client.zig");
 const gemini_types = @import("gemini/types.zig");
 const openai_types = @import("openai/types.zig");
 const anthropic_types = @import("anthropic/types.zig");
-const http = @import("http.zig");
 
 // --- Types ---
 
