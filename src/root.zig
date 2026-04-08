@@ -16,6 +16,9 @@ pub const anthropic = struct {
     pub const types = @import("anthropic/types.zig");
 };
 
+/// Ollama uses the OpenAI-compatible API with a different default base URL.
+pub const ollama = openai;
+
 pub const provider = @import("provider.zig");
 
 test {

@@ -154,6 +154,7 @@ pub const Client = union(enum) {
     gemini: *gemini_mod,
     openai: *openai_mod,
     anthropic: *anthropic_mod,
+    ollama: *openai_mod,
 
     pub const Error = gemini_mod.ApiError || openai_mod.ApiError || anthropic_mod.ApiError;
     pub const StreamError = gemini_mod.StreamError || openai_mod.StreamError || anthropic_mod.StreamError;
@@ -233,7 +234,7 @@ pub const Client = union(enum) {
                 }
                 return result;
             },
-            .openai => |o| {
+            .openai, .ollama => |o| {
                 var req_arena = std.heap.ArenaAllocator.init(o.allocator);
                 defer req_arena.deinit();
                 const req_alloc = req_arena.allocator();
@@ -400,7 +401,7 @@ pub const Client = union(enum) {
                     .toolConfig = mapToolChoiceToGemini(config.tool_choice),
                 }, .{ .user_ctx = context, .user_cb = callback, .alloc = g.allocator }, &Wrapper.wrap);
             },
-            .openai => |o| {
+            .openai, .ollama => |o| {
                 var req_arena = std.heap.ArenaAllocator.init(o.allocator);
                 defer req_arena.deinit();
                 const req_alloc = req_arena.allocator();
@@ -505,7 +506,7 @@ pub const Client = union(enum) {
                 }
                 return result;
             },
-            .openai => |o| {
+            .openai, .ollama => |o| {
                 var response = try o.embedText(model, text);
                 defer response.deinit();
                 var result = EmbedResult.init(o.allocator);
@@ -535,7 +536,7 @@ pub const Client = union(enum) {
     /// Drop down to the OpenAI-specific client.
     pub fn asOpenAI(self: Client) ?*openai_mod {
         return switch (self) {
-            .openai => |o| o,
+            .openai, .ollama => |o| o,
             else => null,
         };
     }
