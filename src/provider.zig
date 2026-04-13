@@ -493,6 +493,9 @@ pub const Client = union(enum) {
     pub const RunToolsConfig = struct {
         tools: []const Tool,
         max_turns: u32 = 20,
+        /// Maximum total number of tool calls to execute across all turns.
+        /// When reached, the loop returns with the results so far.
+        max_tool_calls: ?u32 = null,
         max_tokens: ?i32 = 4096,
         tool_choice: ?ToolChoice = .auto,
         temperature: ?f32 = null,
@@ -557,7 +560,15 @@ pub const Client = union(enum) {
                 });
 
                 var tool_results: std.ArrayListUnmanaged(ToolResult) = .empty;
+                var limit_reached = false;
                 for (tool_calls) |tc| {
+                    if (config.max_tool_calls) |limit| {
+                        if (all_tool_calls.items.len >= limit) {
+                            limit_reached = true;
+                            break;
+                        }
+                    }
+
                     var tool_arena = std.heap.ArenaAllocator.init(self.clientAllocator());
                     defer tool_arena.deinit();
 
@@ -577,11 +588,14 @@ pub const Client = union(enum) {
                     });
                 }
 
-                try messages.append(list_alloc, .{
-                    .role = .tool,
-                    .tool_results = try tool_results.toOwnedSlice(data_alloc),
-                });
+                if (tool_results.items.len > 0) {
+                    try messages.append(list_alloc, .{
+                        .role = .tool,
+                        .tool_results = try tool_results.toOwnedSlice(data_alloc),
+                    });
+                }
 
+                if (limit_reached) break;
                 continue;
             }
 
