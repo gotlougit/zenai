@@ -144,6 +144,11 @@ pub const GenerationConfig = struct {
     tools: ?[]const Tool = null,
     tool_choice: ?ToolChoice = null,
     response_format: ?ResponseFormat = null,
+    /// Per-turn token budget for model reasoning. Provider-specific: Gemini
+    /// thinking models use it for their `thinkingConfig.thinkingBudget` (0
+    /// disables thinking). Ignored by OpenAI/Ollama. Null means use the
+    /// provider default.
+    thinking_budget: ?i32 = null,
 };
 
 /// Unified finish reason.
@@ -547,6 +552,8 @@ pub const Client = union(enum) {
         max_tokens: ?i32 = 4096,
         tool_choice: ?ToolChoice = .auto,
         temperature: ?f32 = null,
+        /// See `GenerationConfig.thinking_budget`. Forwarded per-turn.
+        thinking_budget: ?i32 = null,
     };
 
     /// Information about a tool call that was executed during the loop.
@@ -596,6 +603,7 @@ pub const Client = union(enum) {
                 .max_tokens = config.max_tokens,
                 .tool_choice = config.tool_choice,
                 .temperature = config.temperature,
+                .thinking_budget = config.thinking_budget,
             });
             defer gen_result.deinit();
 
@@ -1139,6 +1147,10 @@ fn mapGeminiGenerationConfig(config: GenerationConfig) gemini_types.GenerationCo
         .presencePenalty = config.presence_penalty,
         .seed = config.seed,
         .responseMimeType = mapResponseFormatToGemini(config.response_format),
+        .thinkingConfig = if (config.thinking_budget) |tb|
+            gemini_types.ThinkingConfig{ .thinkingBudget = tb }
+        else
+            null,
     };
 }
 

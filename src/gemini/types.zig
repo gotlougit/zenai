@@ -770,8 +770,16 @@ pub const GenerateContentResponse = struct {
         const candidates = self.candidates orelse return null;
         if (candidates.len == 0) return null;
         const content = candidates[0].content orelse return null;
-        if (content.parts.len == 0) return null;
-        return content.parts[0].text;
+        // Thinking models (e.g. Gemini 3 flash) may emit reasoning summaries
+        // in parts marked `thought: true`. Those are internal chain-of-thought,
+        // not the final answer — skip them and return the first non-thought
+        // text part. Without this filter, parts[0] (often the thought) leaks
+        // into the caller as the "response".
+        for (content.parts) |part| {
+            if (part.thought == true) continue;
+            if (part.text) |t| return t;
+        }
+        return null;
     }
 
     /// Extract the first function call from the first candidate.
