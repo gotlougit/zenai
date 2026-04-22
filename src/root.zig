@@ -20,6 +20,7 @@ pub const anthropic = struct {
 pub const ollama = openai;
 
 pub const provider = @import("provider.zig");
+pub const retry = @import("retry.zig");
 
 test {
     _ = gemini.Client;
@@ -32,4 +33,5 @@ test {
     _ = anthropic.Chat;
     _ = anthropic.types;
     _ = provider;
+    _ = retry;
 }

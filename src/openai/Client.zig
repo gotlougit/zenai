@@ -1,6 +1,9 @@
 const std = @import("std");
 const types = @import("types.zig");
 const http = @import("../http.zig");
+const retry = @import("../retry.zig");
+
+pub const RetryPolicy = retry.RetryPolicy;
 
 const Message = types.Message;
 const ChatCompletionRequest = types.ChatCompletionRequest;
@@ -16,6 +19,8 @@ base_url: []const u8,
 organization: ?[]const u8,
 project: ?[]const u8,
 http_client: std.http.Client,
+/// Retry policy applied to every non-streaming request.
+retry_policy: RetryPolicy,
 /// The most recent API error detail, if any. Set on `error.ApiError`.
 last_error: ?types.ApiErrorDetail = null,
 last_error_status: ?u10 = null,
@@ -28,6 +33,9 @@ pub const InitOptions = struct {
     organization: ?[]const u8 = null,
     /// Project ID for API requests.
     project: ?[]const u8 = null,
+    /// Retry policy for transient HTTP failures (5xx, 429, and known
+    /// flaky network errors). Pass `RetryPolicy.disabled` to opt out.
+    retry_policy: RetryPolicy = .{},
 };
 
 /// Create a new OpenAI API client.
@@ -39,6 +47,7 @@ pub fn init(allocator: std.mem.Allocator, api_key: []const u8, options: InitOpti
         .organization = options.organization,
         .project = options.project,
         .http_client = .{ .allocator = allocator },
+        .retry_policy = options.retry_policy,
         .last_error = null,
         .last_error_status = null,
     };
@@ -80,26 +89,42 @@ fn setErrorDetail(self: *Client, status_code: u10, body: []const u8) void {
 }
 
 fn fetchGet(self: *Client, url: []const u8, comptime T: type) ApiError!Response(T) {
-    var response_buf: std.Io.Writer.Allocating = .init(self.allocator);
-    errdefer response_buf.deinit();
-
     const auth = self.authHeaders();
-    const result = try self.http_client.fetch(.{
-        .location = .{ .url = url },
-        .extra_headers = &auth,
-        .response_writer = &response_buf.writer,
-    });
 
-    const body = response_buf.written();
-    const status_code: u10 = @intFromEnum(result.status);
-    if (status_code < 200 or status_code >= 300) {
+    var attempt: u8 = 0;
+    while (true) : (attempt += 1) {
+        var response_buf: std.Io.Writer.Allocating = .init(self.allocator);
+        var keep_buf = false;
+        defer if (!keep_buf) response_buf.deinit();
+
+        const result = self.http_client.fetch(.{
+            .location = .{ .url = url },
+            .extra_headers = &auth,
+            .response_writer = &response_buf.writer,
+        }) catch |err| {
+            if (retry.isRetryableFetchError(err) and attempt + 1 < self.retry_policy.max_attempts) {
+                retry.sleepMs(retry.backoffMs(attempt, self.retry_policy));
+                continue;
+            }
+            return err;
+        };
+
+        const body = response_buf.written();
+        const status_code: u10 = @intFromEnum(result.status);
+        if (status_code >= 200 and status_code < 300) {
+            if (body.len == 0) return error.EmptyResponse;
+            const parsed = try std.json.parseFromSlice(T, self.allocator, body, .{ .ignore_unknown_fields = true });
+            keep_buf = true;
+            return .{ .value = parsed.value, .json_buf = response_buf, .parsed = parsed };
+        }
+
+        if (retry.isRetryableStatus(status_code) and attempt + 1 < self.retry_policy.max_attempts) {
+            retry.sleepMs(retry.backoffMs(attempt, self.retry_policy));
+            continue;
+        }
         self.setErrorDetail(status_code, body);
         return error.ApiError;
     }
-    if (body.len == 0) return error.EmptyResponse;
-
-    const parsed = try std.json.parseFromSlice(T, self.allocator, body, .{ .ignore_unknown_fields = true });
-    return .{ .value = parsed.value, .json_buf = response_buf, .parsed = parsed };
 }
 
 fn fetchPost(self: *Client, url: []const u8, body: anytype, comptime T: type) ApiError!Response(T) {
@@ -109,31 +134,47 @@ fn fetchPost(self: *Client, url: []const u8, body: anytype, comptime T: type) Ap
         return error.OutOfMemory;
     const payload = payload_buf.written();
 
-    var response_buf: std.Io.Writer.Allocating = .init(self.allocator);
-    errdefer response_buf.deinit();
-
     const auth = self.authHeaders();
-    const result = try self.http_client.fetch(.{
-        .location = .{ .url = url },
-        .method = .POST,
-        .payload = payload,
-        .extra_headers = &auth,
-        .headers = .{
-            .content_type = .{ .override = "application/json" },
-        },
-        .response_writer = &response_buf.writer,
-    });
 
-    const resp_body = response_buf.written();
-    const status_code: u10 = @intFromEnum(result.status);
-    if (status_code < 200 or status_code >= 300) {
+    var attempt: u8 = 0;
+    while (true) : (attempt += 1) {
+        var response_buf: std.Io.Writer.Allocating = .init(self.allocator);
+        var keep_buf = false;
+        defer if (!keep_buf) response_buf.deinit();
+
+        const result = self.http_client.fetch(.{
+            .location = .{ .url = url },
+            .method = .POST,
+            .payload = payload,
+            .extra_headers = &auth,
+            .headers = .{
+                .content_type = .{ .override = "application/json" },
+            },
+            .response_writer = &response_buf.writer,
+        }) catch |err| {
+            if (retry.isRetryableFetchError(err) and attempt + 1 < self.retry_policy.max_attempts) {
+                retry.sleepMs(retry.backoffMs(attempt, self.retry_policy));
+                continue;
+            }
+            return err;
+        };
+
+        const resp_body = response_buf.written();
+        const status_code: u10 = @intFromEnum(result.status);
+        if (status_code >= 200 and status_code < 300) {
+            if (resp_body.len == 0) return error.EmptyResponse;
+            const parsed = try std.json.parseFromSlice(T, self.allocator, resp_body, .{ .ignore_unknown_fields = true });
+            keep_buf = true;
+            return .{ .value = parsed.value, .json_buf = response_buf, .parsed = parsed };
+        }
+
+        if (retry.isRetryableStatus(status_code) and attempt + 1 < self.retry_policy.max_attempts) {
+            retry.sleepMs(retry.backoffMs(attempt, self.retry_policy));
+            continue;
+        }
         self.setErrorDetail(status_code, resp_body);
         return error.ApiError;
     }
-    if (resp_body.len == 0) return error.EmptyResponse;
-
-    const parsed = try std.json.parseFromSlice(T, self.allocator, resp_body, .{ .ignore_unknown_fields = true });
-    return .{ .value = parsed.value, .json_buf = response_buf, .parsed = parsed };
 }
 
 // --- Chat Completions ---
