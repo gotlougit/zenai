@@ -125,6 +125,12 @@ pub const Role = enum {
 };
 
 /// A message in a conversation, normalized across providers.
+///
+/// Conversation invariant: a `.tool` message (carrying `tool_results`) must
+/// be immediately preceded by an `.assistant` message whose `tool_calls`
+/// it answers. Gemini hard-rejects conversations that violate this; OpenAI
+/// and Anthropic are looser but still prefer the same shape. Callers that
+/// trim history must respect this — see `safeTruncationStart`.
 pub const Message = struct {
     role: Role,
     content: ?[]const u8 = null,
@@ -134,6 +140,40 @@ pub const Message = struct {
     /// building provider content blocks. Currently only supported by Gemini.
     parts: ?[]const ContentPart = null,
 };
+
+/// Smallest index `i` with `i >= min` such that truncating the head of
+/// `messages` to `messages[i..]` keeps the conversation valid: the kept
+/// slice begins on a `.user` turn, so it can never start with an orphan
+/// `.tool` (function response without its function call) or an `.assistant`
+/// continuation that has no driving user prompt.
+///
+/// Returns `null` if no `.user` message exists at or after `min`. Callers
+/// that prepend a separately-stored `.system` message can pass the result
+/// directly as the start of the kept slice.
+pub fn safeTruncationStart(messages: []const Message, min: usize) ?usize {
+    var i = min;
+    while (i < messages.len) : (i += 1) {
+        if (messages[i].role == .user) return i;
+    }
+    return null;
+}
+
+test "safeTruncationStart skips tool and assistant continuations" {
+    const msgs = [_]Message{
+        .{ .role = .system, .content = "sys" },
+        .{ .role = .user, .content = "hi" },
+        .{ .role = .assistant, .content = "calling tool" },
+        .{ .role = .tool, .content = "tool result" },
+        .{ .role = .assistant, .content = "answer" },
+        .{ .role = .user, .content = "next" },
+    };
+    // min lands on `.tool` → walk forward to the next `.user`.
+    try std.testing.expectEqual(@as(?usize, 5), safeTruncationStart(&msgs, 3));
+    // min already on `.user` → return as-is.
+    try std.testing.expectEqual(@as(?usize, 1), safeTruncationStart(&msgs, 1));
+    // No user at or after min → null.
+    try std.testing.expectEqual(@as(?usize, null), safeTruncationStart(&msgs, 6));
+}
 
 /// Minimal generation config — the intersection of what both providers support.
 pub const GenerationConfig = struct {
