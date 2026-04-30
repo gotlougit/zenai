@@ -602,6 +602,8 @@ pub const GroundingChunkRetrievedContext = struct {
     title: ?[]const u8 = null,
     /// Text of the attribution.
     text: ?[]const u8 = null,
+    /// Page number of the retrieved context. Not supported on Vertex AI.
+    pageNumber: ?i32 = null,
 };
 
 /// Grounding chunk — a reference to a source used to ground the response.
