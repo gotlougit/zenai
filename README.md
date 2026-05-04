@@ -1,6 +1,6 @@
 # zenai
 
-Zig client for AI APIs, supporting [Google Gemini](https://ai.google.dev/gemini-api/docs), [OpenAI](https://platform.openai.com/docs/api-reference), and [Anthropic](https://docs.anthropic.com/en/docs/about-claude/models). Ported from the official [Go Gen AI SDK](https://github.com/googleapis/go-genai), [openai-go](https://github.com/openai/openai-go), and [anthropic-sdk-go](https://github.com/anthropics/anthropic-sdk-go).
+Zig client for AI APIs, supporting [Google Gemini](https://ai.google.dev/gemini-api/docs), [OpenAI](https://platform.openai.com/docs/api-reference), and [Anthropic](https://docs.anthropic.com/en/docs/about-claude/models). Ported from the official [Go Gen AI SDK](https://github.com/googleapis/go-genai), [openai-go](https://github.com/openai/openai-go), and [anthropic-sdk-go](https://github.com/anthropics/anthropic-sdk-go). Also ships an `agent infrastructure` namespace under `zenai.search` — currently [Tavily](https://docs.tavily.com/), with room for sibling providers.
 
 <img width="1024" height="1024" alt="Meditating panda with incense smoke" src="https://github.com/user-attachments/assets/b9c82960-05ec-4aa1-b171-092ee2126551" />
 
@@ -251,6 +251,29 @@ if (response.value.firstToolUse()) |tu| {
 }
 ```
 
+## Tavily (search)
+
+Tavily is an AI-friendly search API that returns clean `{title, url, content}` JSON results — handy as a low-noise alternative to scraping a SERP. Set your API key ([get one here](https://app.tavily.com/)):
+
+```bash
+export TAVILY_API_KEY='tvly-...'
+```
+
+```zig
+const zenai = @import("zenai");
+
+const api_key = std.posix.getenv("TAVILY_API_KEY") orelse return error.MissingApiKey;
+var client = zenai.search.tavily.Client.init(allocator, api_key, .{});
+defer client.deinit();
+
+var response = try client.search("what is zig", .{ .max_results = 5 });
+defer response.deinit();
+
+for (response.value.results) |r| {
+    std.debug.print("{s} — {s}\n", .{ r.title, r.url });
+}
+```
+
 ## Provider Abstraction
 
 Use `zenai.provider.Client` to write provider-agnostic code. Swap providers by changing one line:
@@ -316,6 +339,9 @@ switch (ai) {
 - Multi-turn chat with history management
 - Function calling and tool use
 - Extended thinking support
+
+**Search providers:**
+- Tavily (`zenai.search.tavily`) — JSON search API with optional synthesized answers, domain include/exclude, news/general topic, time-range filtering
 
 **Provider abstraction:**
 - Unified text generation, streaming, and embeddings

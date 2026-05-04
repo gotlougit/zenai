@@ -19,6 +19,15 @@ pub const anthropic = struct {
 /// Ollama uses the OpenAI-compatible API with a different default base URL.
 pub const ollama = openai;
 
+/// Search providers — separate namespace from the LLM clients above. Tavily
+/// is the first; Brave/Serper/Google CSE could land as siblings here.
+pub const search = struct {
+    pub const tavily = struct {
+        pub const Client = @import("search/tavily/Client.zig");
+        pub const types = @import("search/tavily/types.zig");
+    };
+};
+
 pub const provider = @import("provider.zig");
 pub const retry = @import("retry.zig");
 
@@ -32,6 +41,8 @@ test {
     _ = anthropic.Client;
     _ = anthropic.Chat;
     _ = anthropic.types;
+    _ = search.tavily.Client;
+    _ = search.tavily.types;
     _ = provider;
     _ = retry;
 }
