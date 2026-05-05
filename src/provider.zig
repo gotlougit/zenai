@@ -175,6 +175,111 @@ test "safeTruncationStart skips tool and assistant continuations" {
     try std.testing.expectEqual(@as(?usize, null), safeTruncationStart(&msgs, 6));
 }
 
+/// Deep-copy a slice of `Message`s into `alloc`, including all nested
+/// strings, tool calls, tool results, and content parts. Intended for
+/// callers that prune conversation history into a fresh arena and need
+/// the kept tail to outlive the old arena.
+pub fn dupeMessages(alloc: std.mem.Allocator, msgs: []const Message) ![]Message {
+    const out = try alloc.alloc(Message, msgs.len);
+    for (msgs, 0..) |msg, i| out[i] = try dupeMessage(alloc, msg);
+    return out;
+}
+
+pub fn dupeMessage(alloc: std.mem.Allocator, msg: Message) !Message {
+    return .{
+        .role = msg.role,
+        .content = if (msg.content) |c| try alloc.dupe(u8, c) else null,
+        .tool_calls = if (msg.tool_calls) |tcs| try dupeToolCalls(alloc, tcs) else null,
+        .tool_results = if (msg.tool_results) |trs| try dupeToolResults(alloc, trs) else null,
+        .parts = if (msg.parts) |ps| try dupeParts(alloc, ps) else null,
+    };
+}
+
+pub fn dupeToolCalls(alloc: std.mem.Allocator, calls: []const ToolCall) ![]const ToolCall {
+    const out = try alloc.alloc(ToolCall, calls.len);
+    for (calls, 0..) |tc, i| {
+        out[i] = .{
+            .id = try alloc.dupe(u8, tc.id),
+            .name = try alloc.dupe(u8, tc.name),
+            .arguments = try alloc.dupe(u8, tc.arguments),
+            .thought_signature = if (tc.thought_signature) |ts| try alloc.dupe(u8, ts) else null,
+        };
+    }
+    return out;
+}
+
+pub fn dupeToolResults(alloc: std.mem.Allocator, results: []const ToolResult) ![]const ToolResult {
+    const out = try alloc.alloc(ToolResult, results.len);
+    for (results, 0..) |tr, i| {
+        out[i] = .{
+            .id = try alloc.dupe(u8, tr.id),
+            .name = try alloc.dupe(u8, tr.name),
+            .content = try alloc.dupe(u8, tr.content),
+            .is_error = tr.is_error,
+            .thought_signature = if (tr.thought_signature) |ts| try alloc.dupe(u8, ts) else null,
+        };
+    }
+    return out;
+}
+
+pub fn dupeParts(alloc: std.mem.Allocator, parts: []const ContentPart) ![]const ContentPart {
+    const out = try alloc.alloc(ContentPart, parts.len);
+    for (parts, 0..) |p, i| {
+        out[i] = switch (p) {
+            .text => |t| .{ .text = try alloc.dupe(u8, t) },
+            .image => |img| .{ .image = .{
+                .data = try alloc.dupe(u8, img.data),
+                .mime_type = try alloc.dupe(u8, img.mime_type),
+            } },
+        };
+    }
+    return out;
+}
+
+test "dupeMessages: deep-copies content and breaks aliasing" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    const src = [_]Message{
+        .{ .role = .user, .content = "hello" },
+        .{ .role = .assistant, .content = "world" },
+    };
+
+    const out = try dupeMessages(arena.allocator(), &src);
+    try std.testing.expectEqual(@as(usize, 2), out.len);
+    try std.testing.expectEqualStrings("hello", out[0].content.?);
+    try std.testing.expectEqualStrings("world", out[1].content.?);
+    try std.testing.expect(out[0].content.?.ptr != src[0].content.?.ptr);
+}
+
+test "dupeMessages: surfaces OOM without partial mutation of inputs" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    var failing = std.testing.FailingAllocator.init(arena.allocator(), .{ .fail_index = 2 });
+    const src = [_]Message{
+        .{ .role = .user, .content = "hello" },
+        .{ .role = .assistant, .content = "world" },
+        .{ .role = .user, .content = "third" },
+    };
+    try std.testing.expectError(error.OutOfMemory, dupeMessages(failing.allocator(), &src));
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqualStrings("hello", src[0].content.?);
+}
+
+test "dupeToolResults: preserves is_error flag" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    const src = [_]ToolResult{
+        .{ .id = "1", .name = "t", .content = "ok" },
+        .{ .id = "2", .name = "t", .content = "boom", .is_error = true },
+    };
+    const out = try dupeToolResults(arena.allocator(), &src);
+    try std.testing.expect(!out[0].is_error);
+    try std.testing.expect(out[1].is_error);
+}
+
 /// Minimal generation config — the intersection of what both providers support.
 pub const GenerationConfig = struct {
     temperature: ?f32 = null,
