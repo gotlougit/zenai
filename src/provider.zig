@@ -881,6 +881,85 @@ pub fn defaultModel(kind: ProviderKind) []const u8 {
     };
 }
 
+/// Fetch the chat-capable model IDs for `kind` and return them sorted in
+/// `arena`. Hides the per-provider `listModels` shape, the
+/// per-provider `isChatModel` filter, and Gemini's `models/` prefix from
+/// callers who only want a list of usable model strings.
+///
+/// `allocator` is used by the underlying HTTP client (for the duration of
+/// the call). `arena` is where the returned slice and its strings are
+/// allocated; caller controls its lifetime. `base_url_override` only
+/// affects providers that take one (openai, ollama).
+pub fn listChatModelIds(
+    allocator: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    kind: ProviderKind,
+    api_key: [:0]const u8,
+    base_url_override: ?[:0]const u8,
+) ![][]const u8 {
+    var ids: std.ArrayList([]const u8) = .empty;
+
+    switch (kind) {
+        .anthropic => {
+            var client = anthropic_mod.init(allocator, api_key, .{});
+            defer client.deinit();
+            var resp = try client.listModels();
+            defer resp.deinit();
+            for (resp.value.data orelse &.{}) |m| {
+                if (!anthropic_mod.isChatModel(m)) continue;
+                if (m.id) |id| try ids.append(arena, try arena.dupe(u8, id));
+            }
+        },
+        .openai => {
+            var client = openai_mod.init(allocator, api_key, if (base_url_override) |u| .{ .base_url = u } else .{});
+            defer client.deinit();
+            var resp = try client.listModels();
+            defer resp.deinit();
+            for (resp.value.data orelse &.{}) |m| {
+                if (!openai_mod.isChatModel(m)) continue;
+                if (m.id) |id| try ids.append(arena, try arena.dupe(u8, id));
+            }
+        },
+        .ollama => {
+            const opts: openai_mod.InitOptions = if (base_url_override) |u|
+                .{ .base_url = u }
+            else
+                .{ .base_url = "http://localhost:11434/v1" };
+            var client = openai_mod.init(allocator, api_key, opts);
+            defer client.deinit();
+            var resp = try client.listModels();
+            defer resp.deinit();
+            // Local catalogs don't follow the naming convention isChatModel
+            // expects, so we don't filter.
+            for (resp.value.data orelse &.{}) |m| {
+                if (m.id) |id| try ids.append(arena, try arena.dupe(u8, id));
+            }
+        },
+        .gemini => {
+            var client = gemini_mod.init(allocator, api_key, .{});
+            defer client.deinit();
+            var resp = try client.listModels(.{});
+            defer resp.deinit();
+            for (resp.value.models orelse &.{}) |m| {
+                if (!gemini_mod.isChatModel(m)) continue;
+                const name = m.name orelse continue;
+                // Gemini returns "models/<id>"; strip so the output is
+                // pipe-ready into a `--model` flag.
+                const stripped = if (std.mem.startsWith(u8, name, "models/")) name["models/".len..] else name;
+                try ids.append(arena, try arena.dupe(u8, stripped));
+            }
+        },
+    }
+
+    std.mem.sort([]const u8, ids.items, {}, struct {
+        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lessThan);
+
+    return ids.items;
+}
+
 test "envApiKey: ollama returns placeholder regardless of env" {
     try std.testing.expectEqualStrings("ollama", envApiKey(.ollama).?);
 }
