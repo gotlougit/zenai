@@ -19,8 +19,10 @@ pub const Tool = struct {
 pub const ToolCall = struct {
     id: []const u8,
     name: []const u8,
-    /// JSON string of the arguments.
-    arguments: []const u8,
+    /// Parsed JSON arguments. Anthropic/Gemini deliver this as a structured
+    /// object on the wire; OpenAI delivers it as a JSON string that we parse
+    /// once at the boundary so downstream consumers never have to re-parse.
+    arguments: ?std.json.Value = null,
     /// Gemini thought signature — must be echoed back with the tool result.
     thought_signature: ?[]const u8 = null,
 };
@@ -201,7 +203,7 @@ pub fn dupeToolCalls(alloc: std.mem.Allocator, calls: []const ToolCall) ![]const
         out[i] = .{
             .id = try alloc.dupe(u8, tc.id),
             .name = try alloc.dupe(u8, tc.name),
-            .arguments = try alloc.dupe(u8, tc.arguments),
+            .arguments = if (tc.arguments) |v| try http.dupeJsonValue(alloc, v) else null,
             .thought_signature = if (tc.thought_signature) |ts| try alloc.dupe(u8, ts) else null,
         };
     }
@@ -413,14 +415,10 @@ pub const Client = union(enum) {
                             var tool_calls: std.ArrayList(ToolCall) = .empty;
                             for (content.parts) |p| {
                                 if (p.functionCall) |fc| {
-                                    const args_str: []const u8 = if (fc.args) |args_val|
-                                        try http.jsonValueToString(result.arena.allocator(), args_val)
-                                    else
-                                        "";
                                     try tool_calls.append(result.arena.allocator(), .{
                                         .id = if (fc.id) |id| try result.arena.allocator().dupe(u8, id) else "",
                                         .name = if (fc.name) |n| try result.arena.allocator().dupe(u8, n) else "",
-                                        .arguments = args_str,
+                                        .arguments = if (fc.args) |v| try http.dupeJsonValue(result.arena.allocator(), v) else null,
                                         .thought_signature = if (p.thoughtSignature) |ts| try result.arena.allocator().dupe(u8, ts) else null,
                                     });
                                 }
@@ -459,10 +457,14 @@ pub const Client = union(enum) {
                                 var tool_calls: std.ArrayList(ToolCall) = .empty;
                                 for (calls) |call| {
                                     if (call.function) |f| {
+                                        const args_val: ?std.json.Value = if (f.arguments) |a|
+                                            (std.json.parseFromSliceLeaky(std.json.Value, result.arena.allocator(), a, .{}) catch null)
+                                        else
+                                            null;
                                         try tool_calls.append(result.arena.allocator(), .{
                                             .id = if (call.id) |id| try result.arena.allocator().dupe(u8, id) else "",
                                             .name = if (f.name) |n| try result.arena.allocator().dupe(u8, n) else "",
-                                            .arguments = if (f.arguments) |a| try result.arena.allocator().dupe(u8, a) else "",
+                                            .arguments = args_val,
                                         });
                                     }
                                 }
@@ -514,14 +516,10 @@ pub const Client = union(enum) {
                     for (blocks) |block| {
                         if (block.type) |t| {
                             if (std.mem.eql(u8, t, "tool_use")) {
-                                const args_str: []const u8 = if (block.input) |input_val|
-                                    try http.jsonValueToString(result.arena.allocator(), input_val)
-                                else
-                                    "";
                                 try tool_calls.append(result.arena.allocator(), .{
                                     .id = if (block.id) |id| try result.arena.allocator().dupe(u8, id) else "",
                                     .name = if (block.name) |n| try result.arena.allocator().dupe(u8, n) else "",
-                                    .arguments = args_str,
+                                    .arguments = if (block.input) |v| try http.dupeJsonValue(result.arena.allocator(), v) else null,
                                 });
                             }
                         }
@@ -683,7 +681,7 @@ pub const Client = union(enum) {
     /// Callback interface for executing tool calls.
     pub const ToolHandler = struct {
         context: *anyopaque,
-        callFn: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator, tool_name: []const u8, arguments: []const u8) Result,
+        callFn: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator, tool_name: []const u8, arguments: ?std.json.Value) Result,
 
         /// What the tool callback returns: the string content the model should
         /// see, plus whether the call errored. `is_error` is the authoritative
@@ -693,7 +691,7 @@ pub const Client = union(enum) {
             is_error: bool = false,
         };
 
-        pub fn call(self: ToolHandler, allocator: std.mem.Allocator, name: []const u8, args: []const u8) Result {
+        pub fn call(self: ToolHandler, allocator: std.mem.Allocator, name: []const u8, args: ?std.json.Value) Result {
             return self.callFn(self.context, allocator, name, args);
         }
     };
@@ -715,7 +713,7 @@ pub const Client = union(enum) {
     /// Information about a tool call that was executed during the loop.
     pub const ToolCallInfo = struct {
         name: []const u8,
-        arguments: []const u8,
+        arguments: ?std.json.Value,
         result: []const u8,
         is_error: bool = false,
     };
@@ -797,7 +795,7 @@ pub const Client = union(enum) {
 
                     try all_tool_calls.append(ra, .{
                         .name = try ra.dupe(u8, tc.name),
-                        .arguments = try ra.dupe(u8, tc.arguments),
+                        .arguments = if (tc.arguments) |v| try http.dupeJsonValue(ra, v) else null,
                         .result = try ra.dupe(u8, handler_result.content),
                         .is_error = handler_result.is_error,
                     });
@@ -844,7 +842,7 @@ pub const Client = union(enum) {
             duped[i] = .{
                 .id = try alloc.dupe(u8, tc.id),
                 .name = try alloc.dupe(u8, tc.name),
-                .arguments = try alloc.dupe(u8, tc.arguments),
+                .arguments = if (tc.arguments) |v| try http.dupeJsonValue(alloc, v) else null,
                 .thought_signature = if (tc.thought_signature) |ts| try alloc.dupe(u8, ts) else null,
             };
         }
@@ -1028,16 +1026,11 @@ fn separateSystemMessages(allocator: std.mem.Allocator, messages: []const Messag
 
         if (msg.tool_calls) |calls| {
             for (calls) |call| {
-                var args: ?std.json.Value = null;
-                if (call.arguments.len > 0) {
-                    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, call.arguments, .{});
-                    args = parsed.value;
-                }
                 try parts.append(allocator, .{
                     .functionCall = .{
                         .id = call.id,
                         .name = call.name,
-                        .args = args,
+                        .args = call.arguments,
                     },
                     .thoughtSignature = call.thought_signature,
                 });
@@ -1108,12 +1101,16 @@ fn messagesToOpenAIMessages(allocator: std.mem.Allocator, messages: []const Mess
         if (msg.tool_calls) |calls| {
             var oai_calls = try allocator.alloc(openai_types.ToolCall, calls.len);
             for (calls, 0..) |call, i| {
+                const args_str: []const u8 = if (call.arguments) |v|
+                    try http.jsonValueToString(allocator, v)
+                else
+                    "";
                 oai_calls[i] = .{
                     .id = call.id,
                     .type = "function",
                     .function = .{
                         .name = call.name,
-                        .arguments = call.arguments,
+                        .arguments = args_str,
                     },
                 };
             }
@@ -1165,16 +1162,11 @@ fn messagesToAnthropicMessages(allocator: std.mem.Allocator, messages: []const M
 
         if (msg.tool_calls) |calls| {
             for (calls) |call| {
-                var input_val: ?std.json.Value = null;
-                if (call.arguments.len > 0) {
-                    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, call.arguments, .{});
-                    input_val = parsed.value;
-                }
                 try blocks.append(allocator, .{
                     .type = "tool_use",
                     .id = call.id,
                     .name = call.name,
-                    .input = input_val,
+                    .input = call.arguments,
                 });
             }
         }
