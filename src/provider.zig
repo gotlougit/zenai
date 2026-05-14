@@ -835,7 +835,6 @@ pub const Client = union(enum) {
             .arena = result_arena,
         };
     }
-
 };
 
 /// Provider tag used in switches and helper APIs.
@@ -850,16 +849,6 @@ pub fn envApiKey(kind: ProviderKind) ?[:0]const u8 {
         .openai => std.posix.getenv("OPENAI_API_KEY"),
         .gemini => std.posix.getenv("GOOGLE_API_KEY") orelse std.posix.getenv("GEMINI_API_KEY"),
         .ollama => "ollama",
-    };
-}
-
-/// Recommended default model for `kind`.
-pub fn defaultModel(kind: ProviderKind) []const u8 {
-    return switch (kind) {
-        .anthropic => "claude-haiku-4-5-20251001",
-        .openai => "gpt-5.4-nano-2026-03-17",
-        .gemini => "gemini-3.1-flash-lite-preview",
-        .ollama => "gemma4",
     };
 }
 
@@ -932,13 +921,6 @@ pub fn listChatModelIds(
 
 test "envApiKey: ollama returns placeholder regardless of env" {
     try std.testing.expectEqualStrings("ollama", envApiKey(.ollama).?);
-}
-
-test "defaultModel: every provider has one" {
-    inline for (@typeInfo(ProviderKind).@"enum".fields) |f| {
-        const m = defaultModel(@field(ProviderKind, f.name));
-        try std.testing.expect(m.len > 0);
-    }
 }
 
 // --- Conversion helpers ---
