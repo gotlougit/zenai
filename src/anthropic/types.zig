@@ -108,6 +108,8 @@ pub const ThinkingConfig = struct {
     type: []const u8 = "disabled",
     /// Token budget for thinking (when type="enabled").
     budget_tokens: ?i32 = null,
+    /// "summarized", "omitted".
+    display: ?[]const u8 = null,
 };
 
 // --- Request ---

@@ -284,10 +284,12 @@ test "dupeToolResults: preserves is_error flag" {
 
 /// Categorical effort level for model reasoning.
 pub const ThinkingLevel = enum {
+    none,
     minimal,
     low,
     medium,
     high,
+    xhigh,
 };
 
 /// Minimal generation config — the intersection of what both providers support.
@@ -302,14 +304,7 @@ pub const GenerationConfig = struct {
     tools: ?[]const Tool = null,
     tool_choice: ?ToolChoice = null,
     response_format: ?ResponseFormat = null,
-    /// Per-turn token budget for model reasoning. Provider-specific: Gemini
-    /// thinking models use it for their `thinkingConfig.thinkingBudget` (0
-    /// disables thinking). Ignored by OpenAI/Ollama. Null means use the
-    /// provider default.
-    thinking_budget: ?i32 = null,
-    /// Per-turn effort level for model reasoning. Provider-specific: Gemini
-    /// 3.5+ thinking models use it for their `thinkingConfig.thinkingLevel`.
-    /// Ignored by OpenAI/Ollama. Null means use the provider default.
+    /// reasoning/thinking effort level.
     thinking_level: ?ThinkingLevel = null,
 };
 
@@ -511,6 +506,7 @@ pub const Client = union(enum) {
                     .stop_sequences = config.stop,
                     .tools = tools,
                     .tool_choice = mapToolChoiceToAnthropic(config.tool_choice),
+                    .thinking = if (config.thinking_level) |tl| mapThinkingLevelToAnthropic(tl) else null,
                     // Anthropic has no native JSON mode; response_format is ignored.
                 });
                 defer response.deinit();
@@ -645,6 +641,7 @@ pub const Client = union(enum) {
                     .stop_sequences = config.stop,
                     .tools = tools,
                     .tool_choice = mapToolChoiceToAnthropic(config.tool_choice),
+                    .thinking = if (config.thinking_level) |tl| mapThinkingLevelToAnthropic(tl) else null,
                     // Anthropic has no native JSON mode; response_format is ignored.
                 }, .{ .user_ctx = context, .user_cb = callback, .alloc = a.allocator }, &Wrapper.wrap);
             },
@@ -718,8 +715,8 @@ pub const Client = union(enum) {
         max_tokens: ?i32 = 4096,
         tool_choice: ?ToolChoice = .auto,
         temperature: ?f32 = null,
-        /// See `GenerationConfig.thinking_budget`. Forwarded per-turn.
-        thinking_budget: ?i32 = null,
+        /// See `GenerationConfig.thinking_level`. Forwarded per-turn.
+        thinking_level: ?ThinkingLevel = null,
         /// Polled before each turn, between the LLM response and tool
         /// execution, and after each tool call. Returning true stops the
         /// loop with `cancelled = true` in the result. The in-flight LLM
@@ -795,7 +792,7 @@ pub const Client = union(enum) {
                 .max_tokens = config.max_tokens,
                 .tool_choice = config.tool_choice,
                 .temperature = config.temperature,
-                .thinking_budget = config.thinking_budget,
+                .thinking_level = config.thinking_level,
             });
             defer gen_result.deinit();
 
@@ -1419,22 +1416,23 @@ fn mapGeminiGenerationConfig(config: GenerationConfig) gemini_types.GenerationCo
         .presencePenalty = config.presence_penalty,
         .seed = config.seed,
         .responseMimeType = mapResponseFormatToGemini(config.response_format),
-        .thinkingConfig = if (config.thinking_budget != null or config.thinking_level != null)
+        .thinkingConfig = if (config.thinking_level) |tl|
             gemini_types.ThinkingConfig{
-                .thinkingBudget = config.thinking_budget,
-                .thinkingLevel = if (config.thinking_level) |tl| mapThinkingLevelToGemini(tl) else null,
+                .thinkingLevel = mapThinkingLevelToGemini(tl),
             }
         else
             null,
     };
 }
 
-fn mapThinkingLevelToGemini(level: ThinkingLevel) gemini_types.ThinkingLevel {
+fn mapThinkingLevelToGemini(level: ThinkingLevel) ?gemini_types.ThinkingLevel {
     return switch (level) {
+        .none => null, // Should we disable? Gemini uses ThinkingConfig presence.
         .minimal => .MINIMAL,
         .low => .LOW,
         .medium => .MEDIUM,
         .high => .HIGH,
+        .xhigh => .HIGH, // Gemini doesn't have XHIGH
     };
 }
 
@@ -1450,6 +1448,29 @@ fn mapOpenAICompletionConfig(config: GenerationConfig, tools: ?[]const openai_ty
         .tools = tools,
         .tool_choice = mapToolChoiceToOpenAI(config.tool_choice),
         .response_format = mapResponseFormatToOpenAI(config.response_format),
+        .reasoning_effort = if (config.thinking_level) |tl| mapThinkingLevelToOpenAI(tl) else null,
+    };
+}
+
+fn mapThinkingLevelToAnthropic(level: ThinkingLevel) ?anthropic_types.ThinkingConfig {
+    return switch (level) {
+        .none => null,
+        .minimal => .{ .type = "adaptive" },
+        .low => .{ .type = "enabled", .budget_tokens = 1024 },
+        .medium => .{ .type = "enabled", .budget_tokens = 4096 },
+        .high => .{ .type = "enabled", .budget_tokens = 16384 },
+        .xhigh => .{ .type = "enabled", .budget_tokens = 32768 },
+    };
+}
+
+fn mapThinkingLevelToOpenAI(level: ThinkingLevel) ?openai_types.ReasoningEffort {
+    return switch (level) {
+        .none => .none,
+        .minimal => .minimal,
+        .low => .low,
+        .medium => .medium,
+        .high => .high,
+        .xhigh => .xhigh,
     };
 }
 

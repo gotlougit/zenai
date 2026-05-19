@@ -136,6 +136,8 @@ pub const ChatCompletionConfig = struct {
     seed: ?i32 = null,
     /// Response format specification.
     response_format: ?types.ResponseFormat = null,
+    /// The effort level for model reasoning.
+    reasoning_effort: ?types.ReasoningEffort = null,
 };
 
 /// Create a chat completion.
@@ -162,6 +164,7 @@ pub fn chatCompletion(
         .tool_choice = config.tool_choice,
         .seed = config.seed,
         .response_format = config.response_format,
+        .reasoning_effort = config.reasoning_effort,
     }, ChatCompletionResponse);
 }
 
@@ -213,6 +216,7 @@ pub fn chatCompletionStream(
         .tool_choice = config.tool_choice,
         .seed = config.seed,
         .response_format = config.response_format,
+        .reasoning_effort = config.reasoning_effort,
     };
     var payload_buf: std.Io.Writer.Allocating = .init(self.allocator);
     defer payload_buf.deinit();

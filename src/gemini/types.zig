@@ -482,9 +482,7 @@ pub const ThinkingLevel = enum {
 pub const ThinkingConfig = struct {
     /// Whether to include the model's thoughts in the response.
     includeThoughts: ?bool = null,
-    /// Budget in tokens for model thinking. Set to 0 to disable thinking.
-    thinkingBudget: ?i32 = null,
-    /// Thinking level for model reasoning. Replaces `thinkingBudget` for Gemini 3.5+.
+    /// effort level for model reasoning.
     thinkingLevel: ?ThinkingLevel = null,
 };
 
@@ -1157,15 +1155,12 @@ test "Schema serializes with enum type" {
 
 test "ThinkingConfig serializes correctly with thinkingLevel" {
     const config = ThinkingConfig{
-        .thinkingBudget = 1000,
         .thinkingLevel = .HIGH,
     };
     var buf: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer buf.deinit();
     try std.json.Stringify.value(config, .{ .emit_null_optional_fields = false }, &buf.writer);
     const json = buf.written();
-    try std.testing.expect(std.mem.indexOf(u8, json, "thinkingBudget") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "1000") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "thinkingLevel") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "HIGH") != null);
 }

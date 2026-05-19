@@ -18,6 +18,16 @@ pub const FinishReason = enum {
     content_filter,
 };
 
+/// The effort level for model reasoning.
+pub const ReasoningEffort = enum {
+    none,
+    minimal,
+    low,
+    medium,
+    high,
+    xhigh,
+};
+
 // --- Core Types ---
 
 /// A function call requested by the model.
@@ -110,6 +120,8 @@ pub const ChatCompletionRequest = struct {
     tool_choice: ?[]const u8 = null,
     /// Random seed for deterministic output.
     seed: ?i32 = null,
+    /// The effort level for model reasoning.
+    reasoning_effort: ?ReasoningEffort = null,
     /// Response format specification.
     response_format: ?ResponseFormat = null,
     /// Number of completions to generate.
