@@ -886,13 +886,13 @@ pub const Client = union(enum) {
 };
 
 /// Provider tag used in switches and helper APIs.
-pub const ProviderKind = std.meta.Tag(Client);
+pub const Tag = std.meta.Tag(Client);
 
-/// Look up the API key for `kind` from the conventional env var(s). Ollama
+/// Look up the API key for `tag` from the conventional env var(s). Ollama
 /// has no key; returns the literal `"ollama"` so OpenAI-shaped clients
 /// clear their non-empty-key check.
-pub fn envApiKey(kind: ProviderKind) ?[:0]const u8 {
-    return switch (kind) {
+pub fn envApiKey(tag: Tag) ?[:0]const u8 {
+    return switch (tag) {
         .anthropic => std.posix.getenv("ANTHROPIC_API_KEY"),
         .openai => std.posix.getenv("OPENAI_API_KEY"),
         .gemini => std.posix.getenv("GOOGLE_API_KEY") orelse std.posix.getenv("GEMINI_API_KEY"),
@@ -900,19 +900,30 @@ pub fn envApiKey(kind: ProviderKind) ?[:0]const u8 {
     };
 }
 
-/// Fetch chat-capable model IDs for `kind`, allocated in `arena`. Ordering
+/// Human-readable name of the env var(s) read by `envApiKey`, for diagnostics.
+/// Gemini reads either of two names, joined with `/`. Ollama has none.
+pub fn envVarName(tag: Tag) []const u8 {
+    return switch (tag) {
+        .anthropic => "ANTHROPIC_API_KEY",
+        .openai => "OPENAI_API_KEY",
+        .gemini => "GOOGLE_API_KEY/GEMINI_API_KEY",
+        .ollama => "<ollama>",
+    };
+}
+
+/// Fetch chat-capable model IDs for `tag`, allocated in `arena`. Ordering
 /// is provider-defined — sort at the call site if needed. `base_url_override`
 /// is only honored for openai/ollama.
 pub fn listChatModelIds(
     allocator: std.mem.Allocator,
     arena: std.mem.Allocator,
-    kind: ProviderKind,
+    tag: Tag,
     api_key: [:0]const u8,
     base_url_override: ?[:0]const u8,
 ) ![][]const u8 {
     var ids: std.ArrayList([]const u8) = .empty;
 
-    switch (kind) {
+    switch (tag) {
         .anthropic => {
             var client = anthropic_mod.init(allocator, api_key, .{});
             defer client.deinit();
