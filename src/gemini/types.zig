@@ -482,7 +482,11 @@ pub const ThinkingLevel = enum {
 pub const ThinkingConfig = struct {
     /// Whether to include the model's thoughts in the response.
     includeThoughts: ?bool = null,
-    /// effort level for model reasoning.
+    /// Token budget for model thinking. Used by Gemini 2.5 models. Set to 0
+    /// to disable thinking (where supported); -1 enables dynamic budgeting.
+    thinkingBudget: ?i32 = null,
+    /// Categorical effort level for model reasoning. Used by Gemini 3+
+    /// models. Mutually exclusive with `thinkingBudget` on a given model.
     thinkingLevel: ?ThinkingLevel = null,
 };
 

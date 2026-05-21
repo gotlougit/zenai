@@ -401,7 +401,7 @@ pub const Client = union(enum) {
 
                 const tools = if (config.tools) |t| try mapGeminiTools(req_alloc, t) else null;
 
-                var response = try g.generateContent(model, contents, mapGeminiGenerationConfig(config), .{
+                var response = try g.generateContent(model, contents, mapGeminiGenerationConfig(model, config), .{
                     .systemInstruction = sys_instruction,
                     .tools = tools,
                     .toolConfig = mapToolChoiceToGemini(config.tool_choice),
@@ -576,7 +576,7 @@ pub const Client = union(enum) {
                     }
                 };
 
-                try g.generateContentStream(model, contents, mapGeminiGenerationConfig(config), .{
+                try g.generateContentStream(model, contents, mapGeminiGenerationConfig(model, config), .{
                     .systemInstruction = sys_instruction,
                     .tools = tools,
                     .toolConfig = mapToolChoiceToGemini(config.tool_choice),
@@ -1406,7 +1406,7 @@ fn convertAnthropicUsage(usage_opt: ?anthropic_types.Usage) Usage {
     };
 }
 
-fn mapGeminiGenerationConfig(config: GenerationConfig) gemini_types.GenerationConfig {
+fn mapGeminiGenerationConfig(model: []const u8, config: GenerationConfig) gemini_types.GenerationConfig {
     return .{
         .temperature = config.temperature,
         .maxOutputTokens = config.max_tokens,
@@ -1417,12 +1417,24 @@ fn mapGeminiGenerationConfig(config: GenerationConfig) gemini_types.GenerationCo
         .seed = config.seed,
         .responseMimeType = mapResponseFormatToGemini(config.response_format),
         .thinkingConfig = if (config.thinking_level) |tl|
-            gemini_types.ThinkingConfig{
-                .thinkingLevel = mapThinkingLevelToGemini(tl),
-            }
+            mapThinkingLevelToGeminiConfig(model, tl)
         else
             null,
     };
+}
+
+/// Gemini 2.5 models use `thinkingBudget` (token count); Gemini 3+ models use
+/// the categorical `thinkingLevel`. Sending the wrong field returns HTTP 400
+/// ("Thinking level is not supported for this model.").
+fn geminiUsesThinkingBudget(model: []const u8) bool {
+    return std.mem.indexOf(u8, model, "gemini-2.5") != null;
+}
+
+fn mapThinkingLevelToGeminiConfig(model: []const u8, level: ThinkingLevel) gemini_types.ThinkingConfig {
+    if (geminiUsesThinkingBudget(model)) {
+        return .{ .thinkingBudget = mapThinkingLevelToGeminiBudget(level) };
+    }
+    return .{ .thinkingLevel = mapThinkingLevelToGemini(level) };
 }
 
 fn mapThinkingLevelToGemini(level: ThinkingLevel) ?gemini_types.ThinkingLevel {
@@ -1433,6 +1445,20 @@ fn mapThinkingLevelToGemini(level: ThinkingLevel) ?gemini_types.ThinkingLevel {
         .medium => .MEDIUM,
         .high => .HIGH,
         .xhigh => .HIGH, // Gemini doesn't have XHIGH
+    };
+}
+
+/// Approximate token budgets for the legacy Gemini 2.5 `thinkingBudget` API.
+/// Note: gemini-2.5-pro does not support disabling thinking (min 128 tokens),
+/// so `.none` will fail on that model — accepted tradeoff.
+fn mapThinkingLevelToGeminiBudget(level: ThinkingLevel) i32 {
+    return switch (level) {
+        .none => 0,
+        .minimal => 512,
+        .low => 2048,
+        .medium => 8192,
+        .high => 16384,
+        .xhigh => -1, // Dynamic — let the model decide, up to its cap.
     };
 }
 
