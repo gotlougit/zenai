@@ -1,7 +1,7 @@
 const std = @import("std");
 const types = @import("types.zig");
 const Client = @import("Client.zig");
-const http = @import("../http.zig");
+const json = @import("../json.zig");
 
 const MessageParam = types.MessageParam;
 const ContentBlockParam = types.ContentBlockParam;
@@ -184,7 +184,7 @@ fn responseToContentBlocks(self: *Chat, response: MessageResponse) std.mem.Alloc
             .text = if (block.text) |t| try a.dupe(u8, t) else null,
             .id = if (block.id) |v| try a.dupe(u8, v) else null,
             .name = if (block.name) |v| try a.dupe(u8, v) else null,
-            .input = if (block.input) |v| try http.dupeJsonValue(a, v) else null,
+            .input = if (block.input) |v| try json.dupeValue(a, v) else null,
             .thinking = if (block.thinking) |v| try a.dupe(u8, v) else null,
             .signature = if (block.signature) |v| try a.dupe(u8, v) else null,
         };
@@ -201,7 +201,7 @@ fn dupeContentBlocks(self: *Chat, blocks: []const ContentBlockParam) std.mem.All
         if (block.text) |v| duped[i].text = try a.dupe(u8, v);
         if (block.id) |v| duped[i].id = try a.dupe(u8, v);
         if (block.name) |v| duped[i].name = try a.dupe(u8, v);
-        if (block.input) |v| duped[i].input = try http.dupeJsonValue(a, v);
+        if (block.input) |v| duped[i].input = try json.dupeValue(a, v);
         if (block.tool_use_id) |v| duped[i].tool_use_id = try a.dupe(u8, v);
         if (block.content) |v| duped[i].content = try a.dupe(u8, v);
         if (block.thinking) |v| duped[i].thinking = try a.dupe(u8, v);

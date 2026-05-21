@@ -1,7 +1,7 @@
 const std = @import("std");
 const types = @import("types.zig");
 const Client = @import("Client.zig");
-const http = @import("../http.zig");
+const json = @import("../json.zig");
 
 const Content = types.Content;
 const Part = types.Part;
@@ -198,12 +198,12 @@ fn dupeParts(self: *Chat, parts: []const Part) std.mem.Allocator.Error![]Part {
         if (part.functionCall) |fc| {
             if (fc.id) |v| duped[i].functionCall.?.id = try a.dupe(u8, v);
             if (fc.name) |v| duped[i].functionCall.?.name = try a.dupe(u8, v);
-            if (fc.args) |v| duped[i].functionCall.?.args = try http.dupeJsonValue(a, v);
+            if (fc.args) |v| duped[i].functionCall.?.args = try json.dupeValue(a, v);
         }
         if (part.functionResponse) |fr| {
             if (fr.id) |v| duped[i].functionResponse.?.id = try a.dupe(u8, v);
             if (fr.name) |v| duped[i].functionResponse.?.name = try a.dupe(u8, v);
-            if (fr.response) |v| duped[i].functionResponse.?.response = try http.dupeJsonValue(a, v);
+            if (fr.response) |v| duped[i].functionResponse.?.response = try json.dupeValue(a, v);
         }
         if (part.executableCode) |ec| {
             if (ec.code) |v| duped[i].executableCode.?.code = try a.dupe(u8, v);
@@ -212,7 +212,7 @@ fn dupeParts(self: *Chat, parts: []const Part) std.mem.Allocator.Error![]Part {
             if (cr.output) |v| duped[i].codeExecutionResult.?.output = try a.dupe(u8, v);
         }
         if (part.thoughtSignature) |v| duped[i].thoughtSignature = try a.dupe(u8, v);
-        if (part.partMetadata) |v| duped[i].partMetadata = try http.dupeJsonValue(a, v);
+        if (part.partMetadata) |v| duped[i].partMetadata = try json.dupeValue(a, v);
     }
     return duped;
 }

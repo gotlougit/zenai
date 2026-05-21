@@ -1,5 +1,5 @@
 const std = @import("std");
-const http = @import("http.zig");
+const json = @import("json.zig");
 const gemini_mod = @import("gemini/Client.zig");
 const openai_mod = @import("openai/Client.zig");
 const anthropic_mod = @import("anthropic/Client.zig");
@@ -203,7 +203,7 @@ pub fn dupeToolCalls(alloc: std.mem.Allocator, calls: []const ToolCall) ![]const
         out[i] = .{
             .id = try alloc.dupe(u8, tc.id),
             .name = try alloc.dupe(u8, tc.name),
-            .arguments = if (tc.arguments) |v| try http.dupeJsonValue(alloc, v) else null,
+            .arguments = if (tc.arguments) |v| try json.dupeValue(alloc, v) else null,
             .thought_signature = if (tc.thought_signature) |ts| try alloc.dupe(u8, ts) else null,
         };
     }
@@ -425,7 +425,7 @@ pub const Client = union(enum) {
                                     try tool_calls.append(result.arena.allocator(), .{
                                         .id = if (fc.id) |id| try result.arena.allocator().dupe(u8, id) else "",
                                         .name = if (fc.name) |n| try result.arena.allocator().dupe(u8, n) else "",
-                                        .arguments = if (fc.args) |v| try http.dupeJsonValue(result.arena.allocator(), v) else null,
+                                        .arguments = if (fc.args) |v| try json.dupeValue(result.arena.allocator(), v) else null,
                                         .thought_signature = if (p.thoughtSignature) |ts| try result.arena.allocator().dupe(u8, ts) else null,
                                     });
                                 }
@@ -529,7 +529,7 @@ pub const Client = union(enum) {
                                 try tool_calls.append(result.arena.allocator(), .{
                                     .id = if (block.id) |id| try result.arena.allocator().dupe(u8, id) else "",
                                     .name = if (block.name) |n| try result.arena.allocator().dupe(u8, n) else "",
-                                    .arguments = if (block.input) |v| try http.dupeJsonValue(result.arena.allocator(), v) else null,
+                                    .arguments = if (block.input) |v| try json.dupeValue(result.arena.allocator(), v) else null,
                                 });
                             }
                         }
@@ -838,7 +838,7 @@ pub const Client = union(enum) {
 
                     try all_tool_calls.append(ra, .{
                         .name = try ra.dupe(u8, tc.name),
-                        .arguments = if (tc.arguments) |v| try http.dupeJsonValue(ra, v) else null,
+                        .arguments = if (tc.arguments) |v| try json.dupeValue(ra, v) else null,
                         .result = try ra.dupe(u8, handler_result.content),
                         .is_error = handler_result.is_error,
                     });
@@ -1139,7 +1139,7 @@ fn messagesToOpenAIMessages(allocator: std.mem.Allocator, messages: []const Mess
             var oai_calls = try allocator.alloc(openai_types.ToolCall, calls.len);
             for (calls, 0..) |call, i| {
                 const args_str: []const u8 = if (call.arguments) |v|
-                    try http.jsonValueToString(allocator, v)
+                    try json.valueToString(allocator, v)
                 else
                     "";
                 oai_calls[i] = .{

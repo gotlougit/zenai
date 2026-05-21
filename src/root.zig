@@ -30,6 +30,7 @@ pub const search = struct {
 
 pub const provider = @import("provider.zig");
 pub const retry = @import("retry.zig");
+pub const json = @import("json.zig");
 
 test {
     _ = gemini.Client;
@@ -45,4 +46,5 @@ test {
     _ = search.tavily.types;
     _ = provider;
     _ = retry;
+    _ = json;
 }
