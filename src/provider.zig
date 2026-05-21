@@ -911,6 +911,30 @@ pub fn envVarName(tag: Tag) []const u8 {
     };
 }
 
+/// A provider tag paired with the env-resolved key that authenticates it.
+/// The two travel together: a tag is only meaningful with its key.
+pub const Credentials = struct {
+    provider: Tag,
+    key: [:0]const u8,
+};
+
+/// Default order for env-driven provider detection. Ollama is excluded —
+/// it has no env key (envApiKey returns a placeholder). Pass an explicit
+/// candidate slice to `detectKeys` to override.
+pub const default_candidates: []const Tag = &.{ .anthropic, .openai, .gemini };
+
+/// Scan `candidates` and fill `buf` with a `Credentials` entry for each
+/// provider that has a key in env, preserving candidate order. Returns the
+/// subslice of `buf` actually filled. `buf.len` must be >= `candidates.len`.
+pub fn detectKeys(buf: []Credentials, candidates: []const Tag) []Credentials {
+    var n: usize = 0;
+    for (candidates) |p| if (envApiKey(p)) |key| {
+        buf[n] = .{ .provider = p, .key = key };
+        n += 1;
+    };
+    return buf[0..n];
+}
+
 /// Fetch chat-capable model IDs for `tag`, allocated in `arena`. Ordering
 /// is provider-defined — sort at the call site if needed. `base_url_override`
 /// is only honored for openai/ollama.
