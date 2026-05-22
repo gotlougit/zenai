@@ -252,6 +252,12 @@ pub const StreamDelta = struct {
     partial_json: ?[]const u8 = null,
     /// Incremental thinking (for thinking_delta).
     thinking: ?[]const u8 = null,
+    /// Per-frame increment of a coarse running estimate of tokens this
+    /// thinking block has produced. Emitted only when the
+    /// `thinking-token-count-2026-05-13` beta is enabled and the response
+    /// would otherwise omit thinking content. Sum across frames for a
+    /// progress hint; `usage.output_tokens` remains authoritative.
+    estimated_tokens: ?i64 = null,
     /// Incremental signature (for signature_delta).
     signature: ?[]const u8 = null,
     /// Structured refusal details (for message_delta events).
