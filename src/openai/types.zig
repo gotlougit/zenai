@@ -136,6 +136,13 @@ pub const ChatCompletionRequest = struct {
 
 // --- Response ---
 
+/// Per-prompt breakdown — currently only `cached_tokens` is surfaced.
+/// OpenAI auto-caches prompts ≥1024 tokens and bills the cached prefix at a
+/// discounted rate; the count shows up here.
+pub const PromptTokensDetails = struct {
+    cached_tokens: ?i32 = null,
+};
+
 /// Token usage statistics.
 pub const Usage = struct {
     /// Tokens in the prompt.
@@ -144,6 +151,8 @@ pub const Usage = struct {
     completion_tokens: ?i32 = null,
     /// Total tokens used.
     total_tokens: ?i32 = null,
+    /// Per-prompt breakdown. Set when the API reports cached tokens.
+    prompt_tokens_details: ?PromptTokensDetails = null,
 };
 
 /// Log probability information for a token.

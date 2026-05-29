@@ -322,6 +322,15 @@ pub const Usage = struct {
     prompt_tokens: ?i32 = null,
     completion_tokens: ?i32 = null,
     total_tokens: ?i32 = null,
+    /// Prompt tokens served from a cache (Anthropic: cache_read_input_tokens;
+    /// OpenAI: prompt_tokens_details.cached_tokens; Gemini:
+    /// cachedContentTokenCount). Billed at the provider's cached rate.
+    cached_tokens: ?i32 = null,
+    /// Tokens written to a fresh cache entry. Anthropic-specific
+    /// (cache_creation_input_tokens). OpenAI and Gemini bill cache creation
+    /// at the standard input rate and don't report it separately, so this
+    /// field stays null on those providers.
+    cache_creation_tokens: ?i32 = null,
 };
 
 /// Unified generation result.
@@ -1403,6 +1412,7 @@ fn mapGeminiUsage(response: gemini_types.GenerateContentResponse) Usage {
         .prompt_tokens = meta.promptTokenCount,
         .completion_tokens = meta.candidatesTokenCount,
         .total_tokens = meta.totalTokenCount,
+        .cached_tokens = meta.cachedContentTokenCount,
     };
 }
 
@@ -1412,6 +1422,7 @@ fn mapOpenAIUsage(response: openai_types.ChatCompletionResponse) Usage {
         .prompt_tokens = usage.prompt_tokens,
         .completion_tokens = usage.completion_tokens,
         .total_tokens = usage.total_tokens,
+        .cached_tokens = if (usage.prompt_tokens_details) |d| d.cached_tokens else null,
     };
 }
 
@@ -1442,6 +1453,8 @@ fn convertAnthropicUsage(usage_opt: ?anthropic_types.Usage) Usage {
             usage.input_tokens.? + usage.output_tokens.?
         else
             null,
+        .cached_tokens = usage.cache_read_input_tokens,
+        .cache_creation_tokens = usage.cache_creation_input_tokens,
     };
 }
 
