@@ -950,9 +950,8 @@ pub const Credentials = struct {
     key: [:0]const u8,
 };
 
-/// Env-detectable providers, in enum order. Ollama is excluded — it has no env
-/// key (envApiKey returns a placeholder), so it must be selected explicitly.
-/// Pass an explicit candidate slice to `detectKeys` to override.
+/// Env-detectable providers, in enum order. Ollama is excluded — its `envApiKey`
+/// is a non-null placeholder, so it must be chosen explicitly, not auto-detected.
 pub const default_candidates: []const Tag = blk: {
     const all = std.enums.values(Tag);
     var arr: [all.len]Tag = undefined;
