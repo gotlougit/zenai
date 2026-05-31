@@ -1245,7 +1245,9 @@ fn messagesToAnthropicMessages(allocator: std.mem.Allocator, messages: []const M
                     .type = "tool_use",
                     .id = call.id,
                     .name = call.name,
-                    .input = call.arguments,
+                    // Anthropic requires `input` on every tool_use block; a
+                    // tool with no arguments must send `{}`, not an absent field.
+                    .input = call.arguments orelse .{ .object = .init(allocator) },
                 });
             }
         }
