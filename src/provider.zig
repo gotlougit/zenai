@@ -818,6 +818,9 @@ pub const Client = union(enum) {
         text: ?[]const u8 = null,
         tool_calls_made: []const ToolCallInfo = &.{},
         cancelled: bool = false,
+        /// Final-turn finish reason. `.safety` is a model refusal — surface it,
+        /// don't re-prompt (deterministic).
+        finish_reason: FinishReason = .unknown,
         /// Sum of per-turn `Usage` across every model call in this runTools
         /// invocation (including tool-call turns that produced no text).
         usage: Usage = .{},
@@ -941,6 +944,7 @@ pub const Client = union(enum) {
                 .text = text,
                 .tool_calls_made = all_tool_calls.toOwnedSlice(ra) catch &.{},
                 .usage = total_usage,
+                .finish_reason = gen_result.finish_reason,
                 .arena = result_arena,
             };
         }
