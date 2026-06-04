@@ -163,12 +163,28 @@ pub const CacheControlEphemeral = struct {
 
 // --- Response ---
 
+/// Read-only breakdown of output tokens by category. `output_tokens` remains
+/// the inclusive, authoritative total used for billing; this object decomposes
+/// it for observability.
+pub const OutputTokensDetails = struct {
+    /// Output tokens the model generated as internal reasoning, including the
+    /// thinking-block delimiter tokens. Reflects the raw reasoning produced,
+    /// not the (possibly shorter) summarized thinking returned in the response,
+    /// and is computed by re-tokenizing the raw reasoning so it may differ from
+    /// the model's exact generation count by a few tokens. Always
+    /// <= `output_tokens`; `output_tokens - thinking_tokens` approximates the
+    /// non-reasoning output.
+    thinking_tokens: ?i64 = null,
+};
+
 /// Token usage statistics.
 pub const Usage = struct {
     /// Number of input tokens.
     input_tokens: ?i32 = null,
     /// Number of output tokens.
     output_tokens: ?i32 = null,
+    /// Breakdown of output tokens by category (e.g. thinking tokens).
+    output_tokens_details: ?OutputTokensDetails = null,
     /// Tokens written to the cache.
     cache_creation_input_tokens: ?i32 = null,
     /// Tokens read from the cache.
@@ -403,6 +419,22 @@ test "StopReason parses from JSON" {
     );
     defer parsed.deinit();
     try std.testing.expect(parsed.value.stop_reason.? == .max_tokens);
+}
+
+test "Usage parses output_tokens_details" {
+    const json =
+        \\{"id":"msg_123","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":120,"output_tokens_details":{"thinking_tokens":80}}}
+    ;
+    const parsed = try std.json.parseFromSlice(
+        MessageResponse,
+        std.testing.allocator,
+        json,
+        .{ .ignore_unknown_fields = true },
+    );
+    defer parsed.deinit();
+    const usage = parsed.value.usage.?;
+    try std.testing.expectEqual(@as(i32, 120), usage.output_tokens.?);
+    try std.testing.expectEqual(@as(i64, 80), usage.output_tokens_details.?.thinking_tokens.?);
 }
 
 test "Role serializes correctly" {
