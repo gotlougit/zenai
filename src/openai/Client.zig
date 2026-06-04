@@ -26,6 +26,8 @@ last_error: ?types.ApiErrorDetail = null,
 last_error_status: ?u10 = null,
 /// Set by the host so a SIGINT can abort an in-flight request mid-read.
 interrupt: ?*http.Interrupt = null,
+/// Cached `Bearer <api_key>` header value, built on first request.
+authorization: ?[]const u8 = null,
 
 /// Options for customizing the API endpoint.
 pub const InitOptions = struct {
@@ -57,6 +59,7 @@ pub fn init(allocator: std.mem.Allocator, api_key: []const u8, options: InitOpti
 
 /// Release all resources held by the client, including HTTP connections.
 pub fn deinit(self: *Client) void {
+    if (self.authorization) |a| self.allocator.free(a);
     self.http_client.deinit();
 }
 
@@ -70,9 +73,11 @@ pub const ApiError = error{
 
 // --- Internal helpers ---
 
-fn authHeaders(self: *const Client) [3]std.http.Header {
+fn authHeaders(self: *Client) ![3]std.http.Header {
+    if (self.authorization == null)
+        self.authorization = try std.fmt.allocPrint(self.allocator, "Bearer {s}", .{self.api_key});
     return .{
-        .{ .name = "Authorization", .value = self.api_key },
+        .{ .name = "Authorization", .value = self.authorization.? },
         .{ .name = "OpenAI-Organization", .value = self.organization orelse "" },
         .{ .name = "OpenAI-Project", .value = self.project orelse "" },
     };
@@ -91,7 +96,7 @@ pub fn setErrorDetail(self: *Client, status_code: u10, body: []const u8) void {
 }
 
 fn fetchGet(self: *Client, url: []const u8, comptime T: type) ApiError!Response(T) {
-    const auth = self.authHeaders();
+    const auth = try self.authHeaders();
     return http.fetchJsonWithRetry(self.allocator, &self.http_client, self.retry_policy, .{
         .location = .{ .url = url },
         .extra_headers = &auth,
@@ -104,7 +109,7 @@ fn fetchPost(self: *Client, url: []const u8, body: anytype, comptime T: type) Ap
     std.json.Stringify.value(body, .{ .emit_null_optional_fields = false }, &payload_buf.writer) catch
         return error.OutOfMemory;
 
-    const auth = self.authHeaders();
+    const auth = try self.authHeaders();
     return http.fetchJsonWithRetry(self.allocator, &self.http_client, self.retry_policy, .{
         .location = .{ .url = url },
         .method = .POST,
@@ -226,7 +231,7 @@ pub fn chatCompletionStream(
         return error.OutOfMemory;
     const payload = payload_buf.written();
 
-    const auth = self.authHeaders();
+    const auth = try self.authHeaders();
     const uri = try std.Uri.parse(url);
     var req = try self.http_client.request(.POST, uri, .{
         .extra_headers = &auth,
