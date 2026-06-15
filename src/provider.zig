@@ -443,6 +443,9 @@ pub const Client = union(enum) {
         /// `ollama_default_base_url` when null; the others use their own.
         base_url: ?[:0]const u8 = null,
         retry_policy: retry.RetryPolicy = .{},
+        /// Hugging Face org to bill via `X-HF-Bill-To`. Only applied to the
+        /// OpenAI-compatible clients; ignored by gemini/anthropic.
+        bill_to: ?[]const u8 = null,
     };
 
     /// Construct the per-provider client for `credentials`; the caller owns it
@@ -459,10 +462,10 @@ pub const Client = union(enum) {
                     .huggingface => huggingface_default_base_url,
                     else => null,
                 };
-                client.* = Impl.init(allocator, credentials.key, if (base_url) |u|
-                    .{ .base_url = u, .retry_policy = options.retry_policy }
-                else
-                    .{ .retry_policy = options.retry_policy });
+                var impl_opts: Impl.InitOptions = .{ .retry_policy = options.retry_policy };
+                if (base_url) |u| impl_opts.base_url = u;
+                if (@hasField(Impl.InitOptions, "bill_to")) impl_opts.bill_to = options.bill_to;
+                client.* = Impl.init(allocator, credentials.key, impl_opts);
                 break :blk @unionInit(Client, @tagName(tag), client);
             },
         };

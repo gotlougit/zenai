@@ -20,6 +20,9 @@ api_key: []const u8,
 base_url: []const u8,
 organization: ?[]const u8,
 project: ?[]const u8,
+/// Hugging Face org to bill via `X-HF-Bill-To`, so the router charges a
+/// Team/Enterprise org instead of the token owner. Ignored by OpenAI/Ollama.
+bill_to: ?[]const u8,
 http_client: std.http.Client,
 /// Retry policy applied to every non-streaming request.
 retry_policy: RetryPolicy,
@@ -43,6 +46,8 @@ pub const InitOptions = struct {
     organization: ?[]const u8 = null,
     /// Project ID for API requests.
     project: ?[]const u8 = null,
+    /// Hugging Face org to bill via the `X-HF-Bill-To` header (see field docs).
+    bill_to: ?[]const u8 = null,
     /// Retry policy for transient HTTP failures (5xx, 429, and known
     /// flaky network errors). Pass `RetryPolicy.disabled` to opt out.
     retry_policy: RetryPolicy = .{},
@@ -56,6 +61,7 @@ pub fn init(allocator: std.mem.Allocator, api_key: []const u8, options: InitOpti
         .base_url = options.base_url,
         .organization = options.organization,
         .project = options.project,
+        .bill_to = options.bill_to,
         .http_client = .{ .allocator = allocator },
         .retry_policy = options.retry_policy,
         .last_error = null,
@@ -80,14 +86,19 @@ pub const ApiError = error{
 
 // --- Internal helpers ---
 
-fn authHeaders(self: *Client) ![3]std.http.Header {
+/// `X-HF-Bill-To` is only emitted when `bill_to` is set, so providers that
+/// don't recognize it never see it.
+fn authHeaders(self: *Client, buf: *[4]std.http.Header) ![]const std.http.Header {
     if (self.authorization == null)
         self.authorization = try std.fmt.allocPrint(self.allocator, "Bearer {s}", .{self.api_key});
-    return .{
-        .{ .name = "Authorization", .value = self.authorization.? },
-        .{ .name = "OpenAI-Organization", .value = self.organization orelse "" },
-        .{ .name = "OpenAI-Project", .value = self.project orelse "" },
-    };
+    buf[0] = .{ .name = "Authorization", .value = self.authorization.? };
+    buf[1] = .{ .name = "OpenAI-Organization", .value = self.organization orelse "" };
+    buf[2] = .{ .name = "OpenAI-Project", .value = self.project orelse "" };
+    if (self.bill_to) |org| {
+        buf[3] = .{ .name = "X-HF-Bill-To", .value = org };
+        return buf[0..4];
+    }
+    return buf[0..3];
 }
 
 pub fn setErrorDetail(self: *Client, status_code: u10, body: []const u8) void {
@@ -103,10 +114,11 @@ pub fn setErrorDetail(self: *Client, status_code: u10, body: []const u8) void {
 }
 
 fn fetchGet(self: *Client, url: []const u8, comptime T: type) ApiError!Response(T) {
-    const auth = try self.authHeaders();
+    var hdr_buf: [4]std.http.Header = undefined;
+    const auth = try self.authHeaders(&hdr_buf);
     return http.fetchJsonWithRetry(self.allocator, &self.http_client, self.retry_policy, .{
         .location = .{ .url = url },
-        .extra_headers = &auth,
+        .extra_headers = auth,
     }, T, self);
 }
 
@@ -116,12 +128,13 @@ fn fetchPost(self: *Client, url: []const u8, body: anytype, comptime T: type) Ap
     std.json.Stringify.value(body, .{ .emit_null_optional_fields = false }, &payload_buf.writer) catch
         return error.OutOfMemory;
 
-    const auth = try self.authHeaders();
+    var hdr_buf: [4]std.http.Header = undefined;
+    const auth = try self.authHeaders(&hdr_buf);
     return http.fetchJsonWithRetry(self.allocator, &self.http_client, self.retry_policy, .{
         .location = .{ .url = url },
         .method = .POST,
         .payload = payload_buf.written(),
-        .extra_headers = &auth,
+        .extra_headers = auth,
         .headers = .{ .content_type = .{ .override = "application/json" } },
     }, T, self);
 }
@@ -251,10 +264,11 @@ pub fn chatCompletionStream(
         return error.OutOfMemory;
     const payload = payload_buf.written();
 
-    const auth = try self.authHeaders();
+    var hdr_buf: [4]std.http.Header = undefined;
+    const auth = try self.authHeaders(&hdr_buf);
     const uri = try std.Uri.parse(url);
     var req = try self.http_client.request(.POST, uri, .{
-        .extra_headers = &auth,
+        .extra_headers = auth,
         .headers = .{
             .content_type = .{ .override = "application/json" },
         },
@@ -419,6 +433,21 @@ test "Client init and deinit" {
     defer client.deinit();
     try std.testing.expectEqualStrings("test-key", client.api_key);
     try std.testing.expectEqualStrings("https://api.openai.com/v1", client.base_url);
+}
+
+test "authHeaders emits X-HF-Bill-To only when bill_to is set" {
+    var buf: [4]std.http.Header = undefined;
+
+    var plain = Client.init(std.testing.allocator, "k", .{});
+    defer plain.deinit();
+    try std.testing.expectEqual(@as(usize, 3), (try plain.authHeaders(&buf)).len);
+
+    var billed = Client.init(std.testing.allocator, "k", .{ .bill_to = "my-org" });
+    defer billed.deinit();
+    const headers = try billed.authHeaders(&buf);
+    try std.testing.expectEqual(@as(usize, 4), headers.len);
+    try std.testing.expectEqualStrings("X-HF-Bill-To", headers[3].name);
+    try std.testing.expectEqualStrings("my-org", headers[3].value);
 }
 
 test "isChatModel keeps chat families" {
