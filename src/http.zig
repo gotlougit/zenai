@@ -13,11 +13,16 @@ pub const FetchError = error{
 /// another thread (the SIGINT handler) calls `fire` to `shutdown` that socket,
 /// which unblocks the read so the request returns an error instead of waiting
 /// for the server. The errored connection is dropped from the pool by `Request.deinit`.
+///
+/// `fire` is sticky: one landing before the socket is armed (during connect/TLS)
+/// is honored by `arm` rather than lost. `reset` clears it per turn.
 pub const Interrupt = struct {
     fd: std.atomic.Value(std.posix.socket_t) = .init(-1),
+    fired: std.atomic.Value(bool) = .init(false),
 
     fn arm(self: *Interrupt, fd: std.posix.socket_t) void {
         self.fd.store(fd, .release);
+        if (self.fired.load(.acquire)) std.posix.shutdown(fd, .both) catch {};
     }
 
     fn disarm(self: *Interrupt) void {
@@ -25,8 +30,19 @@ pub const Interrupt = struct {
     }
 
     pub fn fire(self: *Interrupt) void {
+        self.fired.store(true, .release);
         const fd = self.fd.load(.acquire);
         if (fd >= 0) std.posix.shutdown(fd, .both) catch {};
+    }
+
+    pub fn isFired(self: *const Interrupt) bool {
+        return self.fired.load(.acquire);
+    }
+
+    /// Clear armed + fired state so the interrupt is reusable next turn.
+    pub fn reset(self: *Interrupt) void {
+        self.fired.store(false, .release);
+        self.fd.store(-1, .release);
     }
 };
 
@@ -88,6 +104,8 @@ pub fn fetchJsonWithRetry(
         defer if (!keep_buf) response_buf.deinit();
 
         const status = fetchInterruptible(allocator, http_client, options, &response_buf.writer, interrupt) catch |err| {
+            // Don't retry a request the user cancelled.
+            if (interrupt) |it| if (it.isFired()) return err;
             if (retry.isRetryableFetchError(err) and attempt + 1 < policy.max_attempts) {
                 retry.sleepMs(retry.backoffMs(attempt, policy));
                 continue;

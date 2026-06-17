@@ -1402,6 +1402,13 @@ test "vercel/mistral: real-key cloud presets, auto-detectable" {
     try std.testing.expect(saw_vercel and saw_mistral);
 }
 
+test "reasoning_effort: omitted for none/null effort, sent otherwise" {
+    const tools: ?[]const openai_types.Tool = null;
+    try std.testing.expectEqual(@as(?openai_types.ReasoningEffort, null), mapOpenAICompletionConfig(.{ .effort = .none }, tools).reasoning_effort);
+    try std.testing.expectEqual(@as(?openai_types.ReasoningEffort, null), mapOpenAICompletionConfig(.{ .effort = null }, tools).reasoning_effort);
+    try std.testing.expectEqual(@as(?openai_types.ReasoningEffort, .low), mapOpenAICompletionConfig(.{ .effort = .low }, tools).reasoning_effort);
+}
+
 // --- Conversion helpers ---
 
 /// Extract and concatenate all system messages into a single text string.
@@ -2100,7 +2107,13 @@ fn mapOpenAICompletionConfig(config: GenerationConfig, tools: ?[]const openai_ty
         .tools = tools,
         .tool_choice = mapToolChoiceToOpenAI(config.tool_choice),
         .response_format = mapResponseFormatToOpenAI(config.response_format),
-        .reasoning_effort = if (config.effort) |tl| mapEffortToOpenAI(tl) else null,
+        // `.none` (and a null effort) omit the field entirely rather than send a
+        // value strict providers without reasoning (e.g. Mistral) reject; use
+        // `/effort none` to opt out per model.
+        .reasoning_effort = if (config.effort) |tl|
+            (if (tl == .none) null else mapEffortToOpenAI(tl))
+        else
+            null,
     };
 }
 
