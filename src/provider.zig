@@ -1170,7 +1170,7 @@ fn openAiPreset(tag: Tag) ?OpenAiPreset {
         // Empty default: the served model is whatever `llama-server` loaded.
         .llama_cpp => .{ .base_url = "http://localhost:8080/v1", .placeholder_key = "llama.cpp", .default_model = "", .local = true },
         .vercel => .{ .base_url = "https://ai-gateway.vercel.sh/v1", .env_var = "AI_GATEWAY_API_KEY", .default_model = "openai/gpt-5.5" },
-        .mistral => .{ .base_url = "https://api.mistral.ai/v1", .env_var = "MISTRAL_API_KEY", .default_model = "mistral-large-latest" },
+        .mistral => .{ .base_url = "https://api.mistral.ai/v1", .env_var = "MISTRAL_API_KEY", .default_model = "mistral-medium-3.5" },
         .anthropic, .gemini, .openai => null,
     };
 }
