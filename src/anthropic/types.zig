@@ -123,7 +123,7 @@ pub const ThinkingConfig = struct {
 
 /// Request body for the messages endpoint.
 pub const MessageRequest = struct {
-    /// The model to use (e.g. "claude-sonnet-4-6").
+    /// The model to use (e.g. "claude-sonnet-5").
     model: []const u8,
     /// The messages in the conversation.
     messages: []const MessageParam,
@@ -204,6 +204,8 @@ pub const Usage = struct {
 pub const RefusalCategory = union(enum) {
     cyber,
     bio,
+    frontier_llm,
+    reasoning_extraction,
     unknown: []const u8,
 
     pub const jsonParse = jsonutil.StringUnionMethods(@This()).jsonParse;

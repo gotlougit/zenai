@@ -1210,7 +1210,7 @@ pub const llama_cpp_default_base_url = openAiPreset(.llama_cpp).?.base_url;
 pub fn defaultModel(tag: Tag) []const u8 {
     if (openAiPreset(tag)) |p| return p.default_model;
     return switch (tag) {
-        .anthropic => "claude-sonnet-4-6",
+        .anthropic => "claude-sonnet-5",
         .openai => "gpt-5.5",
         .gemini => "gemini-3.5-flash",
         else => unreachable,
