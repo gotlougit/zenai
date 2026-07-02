@@ -1,6 +1,6 @@
 # zenai
 
-Zig client for AI APIs, supporting [Google Gemini](https://ai.google.dev/gemini-api/docs), [OpenAI](https://platform.openai.com/docs/api-reference), and [Anthropic](https://docs.anthropic.com/en/docs/about-claude/models). OpenAI-compatible endpoints — [Ollama](https://github.com/ollama/ollama/blob/main/docs/openai.md), [Hugging Face Inference](https://huggingface.co/docs/inference-providers/index), and [llama.cpp](https://github.com/ggml-org/llama.cpp/tree/master/tools/server) (`llama-server`) — are supported through the OpenAI client. Ported from the official [Go Gen AI SDK](https://github.com/googleapis/go-genai), [openai-go](https://github.com/openai/openai-go), and [anthropic-sdk-go](https://github.com/anthropics/anthropic-sdk-go). Also ships an `agent infrastructure` namespace under `zenai.search` — currently [Tavily](https://docs.tavily.com/), with room for sibling providers.
+Zig client for AI APIs, supporting [Google Gemini](https://ai.google.dev/gemini-api/docs) (Developer API and [Vertex AI](https://cloud.google.com/vertex-ai/generative-ai/docs)), [OpenAI](https://platform.openai.com/docs/api-reference), and [Anthropic](https://docs.anthropic.com/en/docs/about-claude/models). OpenAI-compatible endpoints — [Ollama](https://github.com/ollama/ollama/blob/main/docs/openai.md), [Hugging Face Inference](https://huggingface.co/docs/inference-providers/index), and [llama.cpp](https://github.com/ggml-org/llama.cpp/tree/master/tools/server) (`llama-server`) — are supported through the OpenAI client. Ported from the official [Go Gen AI SDK](https://github.com/googleapis/go-genai), [openai-go](https://github.com/openai/openai-go), and [anthropic-sdk-go](https://github.com/anthropics/anthropic-sdk-go). Also ships an `agent infrastructure` namespace under `zenai.search` — currently [Tavily](https://docs.tavily.com/), with room for sibling providers.
 
 <img width="1024" height="1024" alt="Meditating panda with incense smoke" src="https://github.com/user-attachments/assets/b9c82960-05ec-4aa1-b171-092ee2126551" />
 
@@ -101,6 +101,34 @@ if (response.value.firstFunctionCall()) |fc| {
     std.debug.print("Call: {s}\n", .{fc.name orelse ""});
 }
 ```
+
+### Google Vertex AI
+
+The same Gemini client can target [Vertex AI](https://cloud.google.com/vertex-ai/generative-ai/docs) instead of the Gemini Developer API. Two modes:
+
+**Express mode** — a plain [Vertex API key](https://cloud.google.com/vertex-ai/generative-ai/docs/start/express-mode/overview), no project needed:
+
+```zig
+var client = zenai.vertex.Client.init(allocator, api_key, .{ .vertex = .{} });
+defer client.deinit();
+```
+
+**Project/location mode** — pass an OAuth access token as the key (refreshing it is your job; tokens expire after ~1 hour):
+
+```bash
+export TOKEN=$(gcloud auth print-access-token)
+```
+
+```zig
+var client = zenai.vertex.Client.init(allocator, token, .{
+    .vertex = .{ .project = "my-project", .location = "global" },
+});
+defer client.deinit();
+```
+
+Generation, streaming, `Chat`, and `countTokens` work in both modes. Model listing works on Vertex too, but Google's `ListPublisherModels` rejects API keys, so it needs project/location mode (OAuth). Embeddings, file uploads, and cached content are Developer-API-only and return `error.UnsupportedByBackend` on Vertex.
+
+Through the provider abstraction, `.vertex` is env-detected when `GOOGLE_GENAI_USE_VERTEXAI=1` (or `true`) is set: express mode reads `GOOGLE_API_KEY`; project mode reads `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION`/`GOOGLE_CLOUD_REGION` (default `"global"`) but needs the access token passed explicitly as the credential.
 
 ## OpenAI
 
@@ -286,6 +314,12 @@ var gemini_client = zenai.gemini.Client.init(allocator, gemini_key, .{});
 defer gemini_client.deinit();
 const ai: zenai.provider.Client = .{ .gemini = &gemini_client };
 
+// Or Vertex AI (same Gemini client, Vertex backend — see the Vertex section):
+// var vertex_client = zenai.vertex.Client.init(allocator, token, .{
+//     .vertex = .{ .project = "my-project" },
+// });
+// const ai: zenai.provider.Client = .{ .vertex = &vertex_client };
+
 // Or:
 // var openai_client = zenai.openai.Client.init(allocator, openai_key, .{});
 // const ai: zenai.provider.Client = .{ .openai = &openai_client };
@@ -340,6 +374,7 @@ switch (ai) {
 - Cached content
 - Model listing and info
 - Safety settings and content filtering
+- Vertex AI backend (express-mode API key, or project/location with an OAuth access token) for generation, streaming, chat, token counting, and model listing
 
 **OpenAI:**
 - Chat completions and streaming (SSE)

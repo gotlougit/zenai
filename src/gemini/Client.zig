@@ -20,11 +20,17 @@ const Client = @This();
 
 allocator: std.mem.Allocator,
 api_key: []const u8,
-base_url: []const u8,
+/// Base URL override; null derives the backend default (see `VertexConfig`).
+base_url: ?[]const u8,
 api_version: []const u8,
+/// Vertex AI backend config; null targets the Gemini Developer API.
+vertex: ?VertexConfig,
 http_client: std.http.Client,
 /// Retry policy applied to every non-streaming request.
 retry_policy: RetryPolicy,
+/// Cached "Bearer {token}" header value for Vertex project/location mode.
+/// Built on first request; owned, freed in `deinit`.
+bearer_value: ?[]u8 = null,
 /// Human-readable message from the most recent API error, owned by the client
 /// and freed on the next failure or `deinit`. Set on `error.ApiError`.
 last_error_message: ?[]u8 = null,
@@ -32,25 +38,49 @@ last_error_status: ?u10 = null,
 /// Set by the host so a SIGINT can abort an in-flight request mid-read.
 interrupt: ?*http.Interrupt = null,
 
+/// Google Vertex AI backend configuration. When set on `InitOptions`, the
+/// client targets Vertex AI instead of the Gemini Developer API.
+pub const VertexConfig = struct {
+    /// GCP project ID for project/location mode, where `api_key` must be an
+    /// OAuth access token (e.g. `gcloud auth print-access-token`). Null
+    /// selects express mode: plain API-key auth against the global endpoint,
+    /// with no `projects/{p}/locations/{l}/` path prefix.
+    project: ?[]const u8 = null,
+    /// GCP location, e.g. "us-central1". "global" (the default) uses
+    /// https://aiplatform.googleapis.com; other values use the regional
+    /// https://{location}-aiplatform.googleapis.com host. Ignored in
+    /// express mode.
+    location: []const u8 = "global",
+};
+
 /// Options for customizing the API endpoint.
 pub const InitOptions = struct {
-    /// Base URL for the Gemini API.
-    base_url: []const u8 = "https://generativelanguage.googleapis.com",
-    /// API version prefix.
-    api_version: []const u8 = "v1beta",
+    /// Base URL override. Null derives the backend default:
+    /// https://generativelanguage.googleapis.com for the Developer API,
+    /// the (possibly regional) aiplatform host for Vertex.
+    base_url: ?[]const u8 = null,
+    /// API version override. Null derives "v1beta" (Developer API) or
+    /// "v1beta1" (Vertex).
+    api_version: ?[]const u8 = null,
     /// Retry policy for transient HTTP failures (5xx, 429, and known
     /// flaky network errors). Pass `RetryPolicy.disabled` to opt out.
     retry_policy: RetryPolicy = .{},
+    /// Target Vertex AI instead of the Gemini Developer API.
+    vertex: ?VertexConfig = null,
 };
 
 /// Create a new Gemini API client.
 /// The `api_key` can be obtained from https://ai.google.dev/gemini-api/docs/api-key
+/// In Vertex project/location mode, pass an OAuth access token instead — the
+/// `MissingApiKey` guard then means "missing access token".
 pub fn init(allocator: std.mem.Allocator, api_key: []const u8, options: InitOptions) Client {
     return .{
         .allocator = allocator,
         .api_key = api_key,
         .base_url = options.base_url,
-        .api_version = options.api_version,
+        .api_version = options.api_version orelse
+            (if (options.vertex != null) "v1beta1" else "v1beta"),
+        .vertex = options.vertex,
         .http_client = .{ .allocator = allocator },
         .retry_policy = options.retry_policy,
         .last_error_message = null,
@@ -61,6 +91,7 @@ pub fn init(allocator: std.mem.Allocator, api_key: []const u8, options: InitOpti
 /// Release all resources held by the client, including HTTP connections.
 pub fn deinit(self: *Client) void {
     if (self.last_error_message) |m| self.allocator.free(m);
+    if (self.bearer_value) |b| self.allocator.free(b);
     self.http_client.deinit();
 }
 
@@ -88,6 +119,7 @@ pub const ApiError = error{
     ApiError,
     MissingApiKey,
     EmptyResponse,
+    UnsupportedByBackend,
 } || std.http.Client.FetchError || std.json.ParseError(std.json.Scanner) || std.mem.Allocator.Error || std.Uri.ParseError;
 
 // --- Internal helpers ---
@@ -104,12 +136,95 @@ pub fn setErrorDetail(self: *Client, status_code: u10, body: []const u8) void {
     }
 }
 
-fn authHeaders(self: *const Client) [1]std.http.Header {
-    return .{.{ .name = "x-goog-api-key", .value = self.api_key }};
+const default_base_url = "https://generativelanguage.googleapis.com";
+
+/// The auth header for this client's backend: `x-goog-api-key` for the
+/// Developer API and Vertex express mode, or `Authorization: Bearer` in
+/// Vertex project/location mode where `api_key` holds an OAuth access token.
+/// The Bearer value is built once and cached on the client.
+fn authHeader(self: *Client) error{OutOfMemory}!std.http.Header {
+    if (self.vertex) |v| if (v.project != null) {
+        const value = self.bearer_value orelse blk: {
+            const b = try std.fmt.allocPrint(self.allocator, "Bearer {s}", .{self.api_key});
+            self.bearer_value = b;
+            break :blk b;
+        };
+        return .{ .name = "authorization", .value = value };
+    };
+    return .{ .name = "x-goog-api-key", .value = self.api_key };
+}
+
+/// Developer-API-only surface: Vertex serves embeddings, files, and cached
+/// content through different endpoints (`:predict`, GCS URIs, project-scoped
+/// resources) that this client doesn't implement.
+fn requireDeveloperApi(self: *const Client) error{UnsupportedByBackend}!void {
+    if (self.vertex != null) return error.UnsupportedByBackend;
+}
+
+/// Base URL for Developer-API-only methods (which run behind
+/// `requireDeveloperApi`, so the Developer default is always correct).
+fn devBaseUrl(self: *const Client) []const u8 {
+    return self.base_url orelse default_base_url;
+}
+
+/// Write the request host: the caller's `base_url` override or the backend
+/// default. Vertex regional hosts embed the location.
+fn writeHost(self: *const Client, w: *std.Io.Writer) std.Io.Writer.Error!void {
+    if (self.base_url) |u| return w.writeAll(u);
+    const v = self.vertex orelse return w.writeAll(default_base_url);
+    if (v.project != null and !std.mem.eql(u8, v.location, "global")) {
+        return w.print("https://{s}-aiplatform.googleapis.com", .{v.location});
+    }
+    return w.writeAll("https://aiplatform.googleapis.com");
+}
+
+const UrlOptions = struct {
+    /// RPC verb appended as ":{action}"; null for plain resource GETs.
+    action: ?[]const u8 = null,
+    /// Prefix "projects/{p}/locations/{l}/" in Vertex project mode. False
+    /// for publisher-model GETs (getModel/listModels), which Vertex serves
+    /// unprefixed even with project auth.
+    project_scope: bool = true,
+};
+
+/// Full URL for a model-scoped call, allocated — caller frees. Developer API:
+/// "{host}/{version}/models/{model}[:action]". Vertex: optionally prefixed
+/// with "projects/{p}/locations/{l}/", the model normalized to a publisher
+/// resource ("publishers/google/models/{model}" for bare names, "org/name" to
+/// "publishers/{org}/models/{name}"); names already prefixed with
+/// "projects/", "models/" or "publishers/" pass through.
+fn modelUrl(self: *const Client, model: []const u8, opts: UrlOptions) error{OutOfMemory}![]u8 {
+    var buf: std.Io.Writer.Allocating = .init(self.allocator);
+    errdefer buf.deinit();
+    self.writeModelUrl(&buf.writer, model, opts) catch return error.OutOfMemory;
+    return buf.toOwnedSlice();
+}
+
+fn writeModelUrl(self: *const Client, w: *std.Io.Writer, model: []const u8, opts: UrlOptions) std.Io.Writer.Error!void {
+    try self.writeHost(w);
+    try w.print("/{s}/", .{self.api_version});
+    if (self.vertex) |v| {
+        if (opts.project_scope and !std.mem.startsWith(u8, model, "projects/")) {
+            if (v.project) |p| try w.print("projects/{s}/locations/{s}/", .{ p, v.location });
+        }
+        if (std.mem.startsWith(u8, model, "projects/") or
+            std.mem.startsWith(u8, model, "models/") or
+            std.mem.startsWith(u8, model, "publishers/"))
+        {
+            try w.writeAll(model);
+        } else if (std.mem.indexOfScalar(u8, model, '/')) |slash| {
+            try w.print("publishers/{s}/models/{s}", .{ model[0..slash], model[slash + 1 ..] });
+        } else {
+            try w.print("publishers/google/models/{s}", .{model});
+        }
+    } else {
+        try w.print("models/{s}", .{model});
+    }
+    if (opts.action) |a| try w.print(":{s}", .{a});
 }
 
 fn fetchGet(self: *Client, url: []const u8, comptime T: type) ApiError!Response(T) {
-    const auth = self.authHeaders();
+    const auth = [1]std.http.Header{try self.authHeader()};
     return http.fetchJsonWithRetry(self.allocator, &self.http_client, self.retry_policy, .{
         .location = .{ .url = url },
         .extra_headers = &auth,
@@ -122,7 +237,7 @@ fn fetchPost(self: *Client, url: []const u8, body: anytype, comptime T: type) Ap
     std.json.Stringify.value(body, .{ .emit_null_optional_fields = false }, &payload_buf.writer) catch
         return error.OutOfMemory;
 
-    const auth = self.authHeaders();
+    const auth = [1]std.http.Header{try self.authHeader()};
     return http.fetchJsonWithRetry(self.allocator, &self.http_client, self.retry_policy, .{
         .location = .{ .url = url },
         .method = .POST,
@@ -146,7 +261,7 @@ pub fn generateContent(
     options: RequestOptions,
 ) ApiError!Response(GenerateContentResponse) {
     if (self.api_key.len == 0) return error.MissingApiKey;
-    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/models/{s}:generateContent", .{ self.base_url, self.api_version, model });
+    const url = try self.modelUrl(model, .{ .action = "generateContent" });
     defer self.allocator.free(url);
 
     return self.fetchPost(url, GenerateContentRequest{
@@ -196,7 +311,7 @@ pub fn generateContentStream(
 ) StreamError!void {
     if (self.api_key.len == 0) return error.MissingApiKey;
 
-    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/models/{s}:streamGenerateContent?alt=sse", .{ self.base_url, self.api_version, model });
+    const url = try self.modelUrl(model, .{ .action = "streamGenerateContent?alt=sse" });
     defer self.allocator.free(url);
 
     const req_body = GenerateContentRequest{
@@ -216,10 +331,9 @@ pub fn generateContentStream(
     const payload = payload_buf.written();
 
     const uri = try std.Uri.parse(url);
+    const auth = [1]std.http.Header{try self.authHeader()};
     var req = try self.http_client.request(.POST, uri, .{
-        .extra_headers = &.{
-            .{ .name = "x-goog-api-key", .value = self.api_key },
-        },
+        .extra_headers = &auth,
         .headers = .{
             .content_type = .{ .override = "application/json" },
         },
@@ -296,7 +410,7 @@ pub fn generateContentStreamFromText(
 /// Get metadata about a specific model (token limits, supported methods, etc.).
 pub fn getModel(self: *Client, model: []const u8) !Response(types.Model) {
     if (self.api_key.len == 0) return error.MissingApiKey;
-    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/models/{s}", .{ self.base_url, self.api_version, model });
+    const url = try self.modelUrl(model, .{ .project_scope = false });
     defer self.allocator.free(url);
     return self.fetchGet(url, types.Model);
 }
@@ -320,10 +434,20 @@ pub fn isChatModel(m: types.Model) bool {
 }
 
 /// List available models. Use `ListOptions` to paginate through results.
+/// On Vertex this lists Google publisher models; the entries carry no
+/// `supportedGenerationMethods` and arrive under `publisherModels`. Google
+/// rejects API keys for this endpoint (HTTP 401), so on Vertex it needs
+/// project/location mode — express mode can generate but not list.
 pub fn listModels(self: *Client, options: ListOptions) !Response(types.ListModelsResponse) {
     if (self.api_key.len == 0) return error.MissingApiKey;
-    const base = try std.fmt.allocPrint(self.allocator, "{s}/{s}/models", .{ self.base_url, self.api_version });
-    defer self.allocator.free(base);
+    var base_buf: std.Io.Writer.Allocating = .init(self.allocator);
+    defer base_buf.deinit();
+    self.writeHost(&base_buf.writer) catch return error.OutOfMemory;
+    base_buf.writer.print("/{s}/{s}", .{
+        self.api_version,
+        if (self.vertex != null) "publishers/google/models" else "models",
+    }) catch return error.OutOfMemory;
+    const base = base_buf.written();
     const url = try http.appendListParams(self.allocator, base, options);
     defer self.allocator.free(url);
     return self.fetchGet(url, types.ListModelsResponse);
@@ -340,7 +464,7 @@ pub fn countTokens(
     options: RequestOptions,
 ) !Response(types.CountTokensResponse) {
     if (self.api_key.len == 0) return error.MissingApiKey;
-    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/models/{s}:countTokens", .{ self.base_url, self.api_version, model });
+    const url = try self.modelUrl(model, .{ .action = "countTokens" });
     defer self.allocator.free(url);
     return self.fetchPost(url, types.CountTokensRequest{
         .contents = contents,
@@ -380,8 +504,9 @@ pub fn embedContent(
     content: Content,
     config: EmbedConfig,
 ) !Response(types.EmbedContentResponse) {
+    try self.requireDeveloperApi();
     if (self.api_key.len == 0) return error.MissingApiKey;
-    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/models/{s}:embedContent", .{ self.base_url, self.api_version, model });
+    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/models/{s}:embedContent", .{ self.devBaseUrl(), self.api_version, model });
     defer self.allocator.free(url);
     return self.fetchPost(url, types.EmbedContentRequest{
         .content = content,
@@ -421,10 +546,11 @@ pub fn uploadFile(
     data: []const u8,
     config: UploadFileConfig,
 ) !Response(types.UploadFileResponse) {
+    try self.requireDeveloperApi();
     if (self.api_key.len == 0) return error.MissingApiKey;
 
     // Stage 1: Initialize resumable upload
-    const create_url = try std.fmt.allocPrint(self.allocator, "{s}/upload/{s}/files", .{ self.base_url, self.api_version });
+    const create_url = try std.fmt.allocPrint(self.allocator, "{s}/upload/{s}/files", .{ self.devBaseUrl(), self.api_version });
     defer self.allocator.free(create_url);
 
     var metadata_buf: std.Io.Writer.Allocating = .init(self.allocator);
@@ -533,16 +659,18 @@ pub fn uploadFile(
 
 /// Get metadata for an uploaded file by its resource name (e.g. "files/abc123").
 pub fn getFile(self: *Client, name: []const u8) !Response(types.File) {
+    try self.requireDeveloperApi();
     if (self.api_key.len == 0) return error.MissingApiKey;
-    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/{s}", .{ self.base_url, self.api_version, name });
+    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/{s}", .{ self.devBaseUrl(), self.api_version, name });
     defer self.allocator.free(url);
     return self.fetchGet(url, types.File);
 }
 
 /// List uploaded files. Use `ListOptions` to paginate through results.
 pub fn listFiles(self: *Client, options: ListOptions) !Response(types.ListFilesResponse) {
+    try self.requireDeveloperApi();
     if (self.api_key.len == 0) return error.MissingApiKey;
-    const base = try std.fmt.allocPrint(self.allocator, "{s}/{s}/files", .{ self.base_url, self.api_version });
+    const base = try std.fmt.allocPrint(self.allocator, "{s}/{s}/files", .{ self.devBaseUrl(), self.api_version });
     defer self.allocator.free(base);
     const url = try http.appendListParams(self.allocator, base, options);
     defer self.allocator.free(url);
@@ -551,6 +679,7 @@ pub fn listFiles(self: *Client, options: ListOptions) !Response(types.ListFilesR
 
 /// Download file contents by URI. Returns owned bytes — caller must free with `allocator.free()`.
 pub fn downloadFile(self: *Client, uri: []const u8) ![]u8 {
+    try self.requireDeveloperApi();
     if (self.api_key.len == 0) return error.MissingApiKey;
 
     var response_buf: std.Io.Writer.Allocating = .init(self.allocator);
@@ -576,8 +705,9 @@ pub fn downloadFile(self: *Client, uri: []const u8) ![]u8 {
 
 /// Delete an uploaded file by its resource name.
 pub fn deleteFile(self: *Client, name: []const u8) !void {
+    try self.requireDeveloperApi();
     if (self.api_key.len == 0) return error.MissingApiKey;
-    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/{s}", .{ self.base_url, self.api_version, name });
+    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/{s}", .{ self.devBaseUrl(), self.api_version, name });
     defer self.allocator.free(url);
 
     const result = try self.http_client.fetch(.{
@@ -622,8 +752,9 @@ pub fn createCachedContent(
     model: []const u8,
     config: CreateCachedContentConfig,
 ) !Response(types.CachedContent) {
+    try self.requireDeveloperApi();
     if (self.api_key.len == 0) return error.MissingApiKey;
-    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/cachedContents", .{ self.base_url, self.api_version });
+    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/cachedContents", .{ self.devBaseUrl(), self.api_version });
     defer self.allocator.free(url);
 
     const full_model = try std.fmt.allocPrint(self.allocator, "models/{s}", .{model});
@@ -643,16 +774,18 @@ pub fn createCachedContent(
 
 /// Get metadata for cached content by its resource name.
 pub fn getCachedContent(self: *Client, name: []const u8) !Response(types.CachedContent) {
+    try self.requireDeveloperApi();
     if (self.api_key.len == 0) return error.MissingApiKey;
-    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/{s}", .{ self.base_url, self.api_version, name });
+    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/{s}", .{ self.devBaseUrl(), self.api_version, name });
     defer self.allocator.free(url);
     return self.fetchGet(url, types.CachedContent);
 }
 
 /// List cached contents. Use `ListOptions` to paginate through results.
 pub fn listCachedContents(self: *Client, options: ListOptions) !Response(types.ListCachedContentsResponse) {
+    try self.requireDeveloperApi();
     if (self.api_key.len == 0) return error.MissingApiKey;
-    const base = try std.fmt.allocPrint(self.allocator, "{s}/{s}/cachedContents", .{ self.base_url, self.api_version });
+    const base = try std.fmt.allocPrint(self.allocator, "{s}/{s}/cachedContents", .{ self.devBaseUrl(), self.api_version });
     defer self.allocator.free(base);
     const url = try http.appendListParams(self.allocator, base, options);
     defer self.allocator.free(url);
@@ -665,6 +798,7 @@ pub fn updateCachedContent(
     name: []const u8,
     config: struct { ttl: ?[]const u8 = null, expireTime: ?[]const u8 = null },
 ) !Response(types.CachedContent) {
+    try self.requireDeveloperApi();
     if (self.api_key.len == 0) return error.MissingApiKey;
 
     // Build updateMask from non-null fields
@@ -677,7 +811,7 @@ pub fn updateCachedContent(
     else
         "";
 
-    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/{s}?updateMask={s}", .{ self.base_url, self.api_version, name, update_mask });
+    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/{s}?updateMask={s}", .{ self.devBaseUrl(), self.api_version, name, update_mask });
     defer self.allocator.free(url);
 
     var payload_buf: std.Io.Writer.Allocating = .init(self.allocator);
@@ -719,8 +853,9 @@ pub fn updateCachedContent(
 
 /// Delete cached content by its resource name.
 pub fn deleteCachedContent(self: *Client, name: []const u8) !void {
+    try self.requireDeveloperApi();
     if (self.api_key.len == 0) return error.MissingApiKey;
-    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/{s}", .{ self.base_url, self.api_version, name });
+    const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}/{s}", .{ self.devBaseUrl(), self.api_version, name });
     defer self.allocator.free(url);
 
     const result = try self.http_client.fetch(.{
@@ -742,7 +877,143 @@ test "Client init and deinit" {
     var client = Client.init(std.testing.allocator, "test-key", .{});
     defer client.deinit();
     try std.testing.expectEqualStrings("test-key", client.api_key);
-    try std.testing.expectEqualStrings("https://generativelanguage.googleapis.com", client.base_url);
+    try std.testing.expect(client.base_url == null);
+    try std.testing.expectEqualStrings("v1beta", client.api_version);
+}
+
+test "init derives the api version per backend, override wins" {
+    var vertex = Client.init(std.testing.allocator, "tok", .{ .vertex = .{} });
+    defer vertex.deinit();
+    try std.testing.expectEqualStrings("v1beta1", vertex.api_version);
+
+    var pinned = Client.init(std.testing.allocator, "tok", .{ .api_version = "v1", .vertex = .{} });
+    defer pinned.deinit();
+    try std.testing.expectEqualStrings("v1", pinned.api_version);
+}
+
+test "modelUrl: developer API" {
+    var client = Client.init(std.testing.allocator, "key", .{});
+    defer client.deinit();
+    const url = try client.modelUrl("gemini-2.5-flash", .{ .action = "generateContent" });
+    defer std.testing.allocator.free(url);
+    try std.testing.expectEqualStrings(
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+        url,
+    );
+}
+
+test "modelUrl: vertex express mode" {
+    var client = Client.init(std.testing.allocator, "key", .{ .vertex = .{} });
+    defer client.deinit();
+    const url = try client.modelUrl("gemini-2.5-flash", .{ .action = "generateContent" });
+    defer std.testing.allocator.free(url);
+    try std.testing.expectEqualStrings(
+        "https://aiplatform.googleapis.com/v1beta1/publishers/google/models/gemini-2.5-flash:generateContent",
+        url,
+    );
+}
+
+test "modelUrl: vertex project mode, global and regional" {
+    var global = Client.init(std.testing.allocator, "tok", .{ .vertex = .{ .project = "my-proj" } });
+    defer global.deinit();
+    const global_url = try global.modelUrl("gemini-2.5-flash", .{ .action = "countTokens" });
+    defer std.testing.allocator.free(global_url);
+    try std.testing.expectEqualStrings(
+        "https://aiplatform.googleapis.com/v1beta1/projects/my-proj/locations/global/publishers/google/models/gemini-2.5-flash:countTokens",
+        global_url,
+    );
+
+    var regional = Client.init(std.testing.allocator, "tok", .{
+        .vertex = .{ .project = "my-proj", .location = "us-central1" },
+    });
+    defer regional.deinit();
+    const regional_url = try regional.modelUrl("gemini-2.5-flash", .{ .action = "generateContent" });
+    defer std.testing.allocator.free(regional_url);
+    try std.testing.expectEqualStrings(
+        "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/my-proj/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent",
+        regional_url,
+    );
+}
+
+test "modelUrl: vertex model name normalization" {
+    var client = Client.init(std.testing.allocator, "tok", .{ .vertex = .{ .project = "p" } });
+    defer client.deinit();
+
+    // Full resource names pass through with no project prefix added.
+    const full = try client.modelUrl("projects/p/locations/global/publishers/google/models/m", .{ .action = "generateContent" });
+    defer std.testing.allocator.free(full);
+    try std.testing.expectEqualStrings(
+        "https://aiplatform.googleapis.com/v1beta1/projects/p/locations/global/publishers/google/models/m:generateContent",
+        full,
+    );
+
+    // Publisher paths pass through (still project-scoped).
+    const published = try client.modelUrl("publishers/google/models/m", .{ .action = "generateContent" });
+    defer std.testing.allocator.free(published);
+    try std.testing.expectEqualStrings(
+        "https://aiplatform.googleapis.com/v1beta1/projects/p/locations/global/publishers/google/models/m:generateContent",
+        published,
+    );
+
+    // "org/name" maps to that org's publisher path.
+    const org = try client.modelUrl("meta/llama-x", .{ .action = "generateContent" });
+    defer std.testing.allocator.free(org);
+    try std.testing.expectEqualStrings(
+        "https://aiplatform.googleapis.com/v1beta1/projects/p/locations/global/publishers/meta/models/llama-x:generateContent",
+        org,
+    );
+
+    // Publisher-model GETs skip the project scope.
+    const unscoped = try client.modelUrl("gemini-2.5-flash", .{ .project_scope = false });
+    defer std.testing.allocator.free(unscoped);
+    try std.testing.expectEqualStrings(
+        "https://aiplatform.googleapis.com/v1beta1/publishers/google/models/gemini-2.5-flash",
+        unscoped,
+    );
+}
+
+test "modelUrl: explicit base_url overrides the backend host" {
+    var client = Client.init(std.testing.allocator, "tok", .{
+        .base_url = "http://localhost:8080",
+        .vertex = .{ .project = "p", .location = "us-central1" },
+    });
+    defer client.deinit();
+    const url = try client.modelUrl("m", .{ .action = "generateContent" });
+    defer std.testing.allocator.free(url);
+    try std.testing.expectEqualStrings(
+        "http://localhost:8080/v1beta1/projects/p/locations/us-central1/publishers/google/models/m:generateContent",
+        url,
+    );
+}
+
+test "authHeader: api key vs cached bearer token" {
+    var dev = Client.init(std.testing.allocator, "key", .{});
+    defer dev.deinit();
+    const dev_header = try dev.authHeader();
+    try std.testing.expectEqualStrings("x-goog-api-key", dev_header.name);
+    try std.testing.expectEqualStrings("key", dev_header.value);
+
+    var express = Client.init(std.testing.allocator, "key", .{ .vertex = .{} });
+    defer express.deinit();
+    try std.testing.expectEqualStrings("x-goog-api-key", (try express.authHeader()).name);
+
+    var project = Client.init(std.testing.allocator, "tok", .{ .vertex = .{ .project = "p" } });
+    defer project.deinit();
+    const first = try project.authHeader();
+    try std.testing.expectEqualStrings("authorization", first.name);
+    try std.testing.expectEqualStrings("Bearer tok", first.value);
+    // Built once and cached; deinit frees it (leak-checked by the test allocator).
+    const second = try project.authHeader();
+    try std.testing.expectEqual(first.value.ptr, second.value.ptr);
+}
+
+test "vertex: developer-only methods are unsupported" {
+    var client = Client.init(std.testing.allocator, "tok", .{ .vertex = .{ .project = "p" } });
+    defer client.deinit();
+    try std.testing.expectError(error.UnsupportedByBackend, client.embedText("m", "hi"));
+    try std.testing.expectError(error.UnsupportedByBackend, client.getFile("files/abc"));
+    try std.testing.expectError(error.UnsupportedByBackend, client.createCachedContent("m", .{}));
+    try std.testing.expectError(error.UnsupportedByBackend, client.deleteFile("files/abc"));
 }
 
 test "isChatModel keeps text/chat models" {
