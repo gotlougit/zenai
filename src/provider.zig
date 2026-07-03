@@ -1213,11 +1213,13 @@ pub fn envApiKey(tag: Tag) ?[:0]const u8 {
             std.posix.getenv("GOOGLE_API_KEY") orelse std.posix.getenv("GEMINI_API_KEY"),
         // Express mode only: with GOOGLE_CLOUD_PROJECT set, the credential
         // must be an OAuth access token the caller supplies explicitly —
-        // not detectable from env.
-        .vertex => if (useVertex() and std.posix.getenv("GOOGLE_CLOUD_PROJECT") == null)
-            std.posix.getenv("GOOGLE_API_KEY")
+        // not detectable from env. VERTEX_API_KEY is unambiguous vertex
+        // intent, so it skips the GOOGLE_GENAI_USE_VERTEXAI opt-in.
+        .vertex => if (std.posix.getenv("GOOGLE_CLOUD_PROJECT") != null)
+            null
         else
-            null,
+            std.posix.getenv("VERTEX_API_KEY") orelse
+                (if (useVertex()) std.posix.getenv("GOOGLE_API_KEY") else null),
         else => unreachable,
     };
 }
@@ -1230,7 +1232,7 @@ pub fn envVarName(tag: Tag) []const u8 {
         .anthropic => "ANTHROPIC_API_KEY",
         .openai => "OPENAI_API_KEY",
         .gemini => "GOOGLE_API_KEY/GEMINI_API_KEY",
-        .vertex => "GOOGLE_API_KEY",
+        .vertex => "VERTEX_API_KEY/GOOGLE_API_KEY",
         else => unreachable,
     };
 }
