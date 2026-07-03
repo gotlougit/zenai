@@ -876,6 +876,9 @@ pub const Model = struct {
 /// Response from the listModels endpoint.
 pub const ListModelsResponse = struct {
     models: ?[]const Model = null,
+    /// Vertex AI `publishers/google/models` responses use this key instead
+    /// of `models`; entries carry no `supportedGenerationMethods`.
+    publisherModels: ?[]const Model = null,
     /// Token for fetching the next page of results.
     nextPageToken: ?[]const u8 = null,
 };

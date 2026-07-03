@@ -425,6 +425,7 @@ pub const EmbedResult = struct {
 pub const Client = union(enum) {
     anthropic: *anthropic_mod,
     gemini: *gemini_mod,
+    vertex: *gemini_mod,
     openai: *openai_mod,
     ollama: *openai_mod,
     huggingface: *openai_mod,
@@ -449,6 +450,14 @@ pub const Client = union(enum) {
         /// Hugging Face org to bill via `X-HF-Bill-To`. Only applied to the
         /// OpenAI-compatible clients; ignored by gemini/anthropic.
         bill_to: ?[]const u8 = null,
+        /// GCP project for `.vertex` project/location mode (falls back to
+        /// GOOGLE_CLOUD_PROJECT). When set, `Credentials.key` must be an
+        /// OAuth access token, not an API key. Ignored by other providers.
+        project: ?[]const u8 = null,
+        /// GCP location for `.vertex` (falls back to GOOGLE_CLOUD_LOCATION,
+        /// then GOOGLE_CLOUD_REGION, then "global"). Ignored by other
+        /// providers.
+        location: ?[]const u8 = null,
     };
 
     /// Construct the per-provider client for `credentials`; the caller owns it
@@ -465,6 +474,11 @@ pub const Client = union(enum) {
                 var impl_opts: Impl.InitOptions = .{ .retry_policy = options.retry_policy };
                 if (base_url) |u| impl_opts.base_url = u;
                 if (@hasField(Impl.InitOptions, "bill_to")) impl_opts.bill_to = options.bill_to;
+                if (tag == .vertex) impl_opts.vertex = .{
+                    .project = options.project orelse std.posix.getenv("GOOGLE_CLOUD_PROJECT"),
+                    .location = options.location orelse std.posix.getenv("GOOGLE_CLOUD_LOCATION") orelse
+                        std.posix.getenv("GOOGLE_CLOUD_REGION") orelse "global",
+                };
                 client.* = Impl.init(allocator, credentials.key, impl_opts);
                 break :blk @unionInit(Client, @tagName(tag), client);
             },
@@ -511,7 +525,7 @@ pub const Client = union(enum) {
         config: GenerationConfig,
     ) Error!GenerateResult {
         switch (self) {
-            .gemini => |g| {
+            .gemini, .vertex => |g| {
                 var req_arena = std.heap.ArenaAllocator.init(g.allocator);
                 defer req_arena.deinit();
                 const req_alloc = req_arena.allocator();
@@ -793,7 +807,7 @@ pub const Client = union(enum) {
         callback: *const fn (@TypeOf(context), GenerateResult) void,
     ) StreamError!void {
         switch (self) {
-            .gemini => |g| {
+            .gemini, .vertex => |g| {
                 var req_arena = std.heap.ArenaAllocator.init(g.allocator);
                 defer req_arena.deinit();
                 const req_alloc = req_arena.allocator();
@@ -909,7 +923,7 @@ pub const Client = union(enum) {
         text: []const u8,
     ) Error!EmbedResult {
         switch (self) {
-            .gemini => |g| {
+            .gemini, .vertex => |g| {
                 var response = try g.embedText(model, text);
                 defer response.deinit();
                 var result = EmbedResult.init(g.allocator);
@@ -1171,12 +1185,20 @@ fn openAiPreset(tag: Tag) ?OpenAiPreset {
         .llama_cpp => .{ .base_url = "http://localhost:8080/v1", .placeholder_key = "llama.cpp", .default_model = "", .local = true },
         .vercel => .{ .base_url = "https://ai-gateway.vercel.sh/v1", .env_var = "AI_GATEWAY_API_KEY", .default_model = "openai/gpt-5.5" },
         .mistral => .{ .base_url = "https://api.mistral.ai/v1", .env_var = "MISTRAL_API_KEY", .default_model = "mistral-medium-3.5" },
-        .anthropic, .gemini, .openai => null,
+        .anthropic, .gemini, .vertex, .openai => null,
     };
 }
 
 /// Look up the API key for `tag` from the conventional env var(s). Keyless local
 /// servers return a placeholder so OpenAI-shaped clients clear their key check.
+/// True when GOOGLE_GENAI_USE_VERTEXAI is "1" or "true" (case-insensitive),
+/// matching go-genai's backend selection. Gates env detection so exactly one
+/// of `.gemini`/`.vertex` can ever detect from GOOGLE_API_KEY.
+pub fn useVertex() bool {
+    const v = std.posix.getenv("GOOGLE_GENAI_USE_VERTEXAI") orelse return false;
+    return std.mem.eql(u8, v, "1") or std.ascii.eqlIgnoreCase(v, "true");
+}
+
 pub fn envApiKey(tag: Tag) ?[:0]const u8 {
     if (openAiPreset(tag)) |p| {
         if (p.env_var) |v| return std.posix.getenv(v);
@@ -1185,7 +1207,17 @@ pub fn envApiKey(tag: Tag) ?[:0]const u8 {
     return switch (tag) {
         .anthropic => std.posix.getenv("ANTHROPIC_API_KEY"),
         .openai => std.posix.getenv("OPENAI_API_KEY"),
-        .gemini => std.posix.getenv("GOOGLE_API_KEY") orelse std.posix.getenv("GEMINI_API_KEY"),
+        .gemini => if (useVertex())
+            null
+        else
+            std.posix.getenv("GOOGLE_API_KEY") orelse std.posix.getenv("GEMINI_API_KEY"),
+        // Express mode only: with GOOGLE_CLOUD_PROJECT set, the credential
+        // must be an OAuth access token the caller supplies explicitly —
+        // not detectable from env.
+        .vertex => if (useVertex() and std.posix.getenv("GOOGLE_CLOUD_PROJECT") == null)
+            std.posix.getenv("GOOGLE_API_KEY")
+        else
+            null,
         else => unreachable,
     };
 }
@@ -1198,6 +1230,7 @@ pub fn envVarName(tag: Tag) []const u8 {
         .anthropic => "ANTHROPIC_API_KEY",
         .openai => "OPENAI_API_KEY",
         .gemini => "GOOGLE_API_KEY/GEMINI_API_KEY",
+        .vertex => "GOOGLE_API_KEY",
         else => unreachable,
     };
 }
@@ -1212,7 +1245,7 @@ pub fn defaultModel(tag: Tag) []const u8 {
     return switch (tag) {
         .anthropic => "claude-sonnet-5",
         .openai => "gpt-5.5",
-        .gemini => "gemini-3.5-flash",
+        .gemini, .vertex => "gemini-3.5-flash",
         else => unreachable,
     };
 }
@@ -1352,6 +1385,25 @@ pub fn listChatModelIds(
                 try ids.append(arena, try arena.dupe(u8, stripped));
             }
         },
+        .vertex => {
+            var client = gemini_mod.init(allocator, api_key, .{ .vertex = .{
+                .project = std.posix.getenv("GOOGLE_CLOUD_PROJECT"),
+                .location = std.posix.getenv("GOOGLE_CLOUD_LOCATION") orelse
+                    std.posix.getenv("GOOGLE_CLOUD_REGION") orelse "global",
+            } });
+            defer client.deinit();
+            var resp = try client.listModels(.{});
+            defer resp.deinit();
+            // Vertex publisher models carry no supportedGenerationMethods,
+            // so the isChatModel filter can't apply; strip the resource
+            // prefix so the output is pipe-ready into a `--model` flag.
+            for (resp.value.publisherModels orelse &.{}) |m| {
+                const name = m.name orelse continue;
+                const prefix = "publishers/google/models/";
+                const stripped = if (std.mem.startsWith(u8, name, prefix)) name[prefix.len..] else name;
+                try ids.append(arena, try arena.dupe(u8, stripped));
+            }
+        },
         else => unreachable,
     }
 
@@ -1375,6 +1427,19 @@ test "isLoopbackUrl: loopback hosts disable retry, remote hosts keep it" {
     try std.testing.expect(!isLoopbackUrl("http://ollama.example.com:11434/v1"));
     try std.testing.expect(!isLoopbackUrl("http://192.168.1.10:11434/v1"));
     try std.testing.expect(!isLoopbackUrl("not a url"));
+}
+
+test "vertex: gemini-backed, no OpenAI preset, gated auto-detection" {
+    try std.testing.expect(openAiPreset(.vertex) == null);
+    try std.testing.expectEqualStrings(defaultModel(.gemini), defaultModel(.vertex));
+    try std.testing.expect(envVarName(.vertex).len > 0);
+    // Candidacy is runtime-gated by GOOGLE_GENAI_USE_VERTEXAI (useVertex),
+    // not comptime-excluded, so the tag stays in the candidate list.
+    var found = false;
+    for (default_candidates) |t| {
+        if (t == .vertex) found = true;
+    }
+    try std.testing.expect(found);
 }
 
 test "huggingface: reads HF_TOKEN and has sensible defaults" {
