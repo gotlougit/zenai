@@ -135,6 +135,8 @@ pub const MessageConfig = struct {
     tool_choice: ?types.ToolChoice = null,
     /// Extended thinking configuration.
     thinking: ?types.ThinkingConfig = null,
+    /// Output-level controls.
+    output_config: ?types.OutputConfig = null,
 };
 
 /// Create a message.
@@ -161,6 +163,7 @@ pub fn createMessage(
         .tools = config.tools,
         .tool_choice = config.tool_choice,
         .thinking = config.thinking,
+        .output_config = config.output_config,
         // Apply an ephemeral cache_control marker to the last cacheable block
         // (default 5-minute TTL). For agent loops this caches the system
         // prompt + tool definitions across turns, dropping repeated-prefix
@@ -221,6 +224,7 @@ pub fn createMessageStream(
         .tools = config.tools,
         .tool_choice = config.tool_choice,
         .thinking = config.thinking,
+        .output_config = config.output_config,
         // See createMessage above for cache_control rationale.
         .cache_control = .{},
     };

@@ -119,6 +119,12 @@ pub const ThinkingConfig = struct {
     display: ?[]const u8 = null,
 };
 
+/// Output-level generation controls.
+pub const OutputConfig = struct {
+    /// "low", "medium", "high", "xhigh", "max".
+    effort: ?[]const u8 = null,
+};
+
 // --- Request ---
 
 /// Request body for the messages endpoint.
@@ -147,6 +153,8 @@ pub const MessageRequest = struct {
     stream: ?bool = null,
     /// Extended thinking configuration.
     thinking: ?ThinkingConfig = null,
+    /// Output-level controls.
+    output_config: ?OutputConfig = null,
     /// Request metadata.
     metadata: ?Metadata = null,
     /// Top-level cache control — applies an ephemeral cache_control marker to
