@@ -546,35 +546,7 @@ pub const Client = union(enum) {
                 });
                 defer response.deinit();
 
-                var result = GenerateResult.init(g.allocator);
-                errdefer result.deinit();
-                if (response.value.text()) |t| {
-                    result.text = try result.arena.allocator().dupe(u8, t);
-                }
-                result.finish_reason = mapGeminiFinishReason(response.value);
-                result.usage = mapGeminiUsage(response.value);
-
-                if (response.value.candidates) |candidates| {
-                    if (candidates.len > 0) {
-                        if (candidates[0].content) |content| {
-                            var tool_calls: std.ArrayList(ToolCall) = .empty;
-                            for (content.parts) |p| {
-                                if (p.functionCall) |fc| {
-                                    try tool_calls.append(result.arena.allocator(), .{
-                                        .id = if (fc.id) |id| try result.arena.allocator().dupe(u8, id) else "",
-                                        .name = if (fc.name) |n| try result.arena.allocator().dupe(u8, n) else "",
-                                        .arguments = if (fc.args) |v| try json.dupeValue(result.arena.allocator(), v) else null,
-                                        .thought_signature = if (p.thoughtSignature) |ts| try result.arena.allocator().dupe(u8, ts) else null,
-                                    });
-                                }
-                            }
-                            if (tool_calls.items.len > 0) {
-                                result.tool_calls = try tool_calls.toOwnedSlice(result.arena.allocator());
-                            }
-                        }
-                    }
-                }
-                return result;
+                return geminiResult(g.allocator, response.value);
             },
             .openai => |o| {
                 var req_arena = std.heap.ArenaAllocator.init(o.allocator);
@@ -598,36 +570,7 @@ pub const Client = union(enum) {
                 });
                 defer response.deinit();
 
-                var result = GenerateResult.init(o.allocator);
-                errdefer result.deinit();
-                const ga = result.arena.allocator();
-
-                if (response.value.text()) |t| {
-                    result.text = try ga.dupe(u8, t);
-                }
-                result.finish_reason = mapOpenAIResponsesFinishReason(response.value);
-                result.usage = mapOpenAIResponsesUsage(response.value);
-
-                if (response.value.output) |items| {
-                    var tool_calls: std.ArrayList(ToolCall) = .empty;
-                    for (items) |item| {
-                        const item_type = item.type orelse continue;
-                        if (!std.mem.eql(u8, item_type, "function_call")) continue;
-                        const args_val: ?std.json.Value = if (item.arguments) |a|
-                            (std.json.parseFromSliceLeaky(std.json.Value, ga, a, .{}) catch null)
-                        else
-                            null;
-                        try tool_calls.append(ga, .{
-                            .id = if (item.call_id) |id| try ga.dupe(u8, id) else "",
-                            .name = if (item.name) |n| try ga.dupe(u8, n) else "",
-                            .arguments = args_val,
-                        });
-                    }
-                    if (tool_calls.items.len > 0) {
-                        result.tool_calls = try tool_calls.toOwnedSlice(ga);
-                    }
-                }
-                return result;
+                return openAiResponsesResult(o.allocator, response.value);
             },
             // Native `/api/chat` so `num_ctx` can be sized — see `openai/ollama.zig`.
             .ollama => |o| {
@@ -702,41 +645,7 @@ pub const Client = union(enum) {
                 var response = try o.chatCompletion(model, oai_messages, mapOpenAICompletionConfig(config, tools));
                 defer response.deinit();
 
-                var result = GenerateResult.init(o.allocator);
-                errdefer result.deinit();
-                const ga = result.arena.allocator();
-
-                if (response.value.text()) |t| {
-                    if (t.len > 0) result.text = try ga.dupe(u8, t);
-                }
-                result.finish_reason = mapOpenAIFinishReason(response.value);
-                result.usage = mapOpenAIUsage(response.value);
-
-                extract: {
-                    const choices = response.value.choices orelse break :extract;
-                    if (choices.len == 0) break :extract;
-                    const msg = choices[0].message orelse break :extract;
-                    const calls = msg.tool_calls orelse break :extract;
-
-                    var tool_calls: std.ArrayList(ToolCall) = .empty;
-                    for (calls) |call| {
-                        const f = call.function orelse continue;
-                        // Chat Completions returns arguments as a JSON string.
-                        const args_val: ?std.json.Value = if (f.arguments) |a|
-                            (std.json.parseFromSliceLeaky(std.json.Value, ga, a, .{}) catch null)
-                        else
-                            null;
-                        try tool_calls.append(ga, .{
-                            .id = if (call.id) |id| try ga.dupe(u8, id) else "",
-                            .name = if (f.name) |n| try ga.dupe(u8, n) else "",
-                            .arguments = args_val,
-                        });
-                    }
-                    if (tool_calls.items.len > 0) {
-                        result.tool_calls = try tool_calls.toOwnedSlice(ga);
-                    }
-                }
-                return result;
+                return openAiChatResult(o.allocator, response.value);
             },
             .anthropic => |a| {
                 var req_arena = std.heap.ArenaAllocator.init(a.allocator);
@@ -767,32 +676,7 @@ pub const Client = union(enum) {
                 });
                 defer response.deinit();
 
-                var result = GenerateResult.init(a.allocator);
-                errdefer result.deinit();
-                if (response.value.text()) |t| {
-                    result.text = try result.arena.allocator().dupe(u8, t);
-                }
-                result.finish_reason = mapAnthropicFinishReason(response.value);
-                result.usage = mapAnthropicUsage(response.value);
-
-                if (response.value.content) |blocks| {
-                    var tool_calls: std.ArrayList(ToolCall) = .empty;
-                    for (blocks) |block| {
-                        if (block.type) |t| {
-                            if (std.mem.eql(u8, t, "tool_use")) {
-                                try tool_calls.append(result.arena.allocator(), .{
-                                    .id = if (block.id) |id| try result.arena.allocator().dupe(u8, id) else "",
-                                    .name = if (block.name) |n| try result.arena.allocator().dupe(u8, n) else "",
-                                    .arguments = if (block.input) |v| try json.dupeValue(result.arena.allocator(), v) else null,
-                                });
-                            }
-                        }
-                    }
-                    if (tool_calls.items.len > 0) {
-                        result.tool_calls = try tool_calls.toOwnedSlice(result.arena.allocator());
-                    }
-                }
-                return result;
+                return anthropicResult(a.allocator, response.value);
             },
         }
     }
@@ -916,6 +800,131 @@ pub const Client = union(enum) {
         }
     }
 
+    /// Streaming counterpart of `generateContent`: reassembles the full
+    /// response — text and tool-use blocks — into a buffered `GenerateResult`
+    /// while forwarding each text delta to `on_text` as it arrives. Used by
+    /// `runTools` when a `TextDeltaHook` is configured. The returned struct is
+    /// shape-identical to `generateContent`'s, so the tool loop is unaffected.
+    fn generateContentStreamAccumulate(
+        self: Client,
+        model: []const u8,
+        messages: []const Message,
+        config: GenerationConfig,
+        on_text: TextDeltaHook,
+    ) Error!GenerateResult {
+        switch (self) {
+            .anthropic => |a| {
+                var req_arena = std.heap.ArenaAllocator.init(a.allocator);
+                defer req_arena.deinit();
+                const req_alloc = req_arena.allocator();
+
+                const system_text = try extractSystemText(req_alloc, messages);
+                const ant_messages = try messagesToAnthropicMessages(req_alloc, messages);
+                const system_blocks: ?[]const anthropic_types.TextBlock = if (system_text) |sys|
+                    @as([]const anthropic_types.TextBlock, &.{.{ .text = sys }})
+                else
+                    null;
+                const tools = if (config.tools) |t| try mapAnthropicTools(req_alloc, t) else null;
+                const reasoning = mapEffortToAnthropic(config.effort, config.max_tokens orelse 4096);
+
+                var acc = anthropic_mod.StreamAccumulator.init(req_alloc, on_text.context, on_text.onText);
+                a.createMessageStream(model, ant_messages, reasoning.max_tokens, .{
+                    .system = system_blocks,
+                    .temperature = config.temperature,
+                    .top_p = config.top_p,
+                    .stop_sequences = config.stop,
+                    .tools = tools,
+                    .tool_choice = mapToolChoiceToAnthropic(config.tool_choice),
+                    .thinking = reasoning.thinking,
+                    .output_config = reasoning.output_config,
+                }, &acc, anthropic_mod.StreamAccumulator.onEvent) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.ApiError,
+                };
+                if (acc.err) |e| return e;
+                return anthropicResult(a.allocator, try acc.response());
+            },
+            .huggingface, .llama_cpp, .vercel, .mistral => |o| {
+                var req_arena = std.heap.ArenaAllocator.init(o.allocator);
+                defer req_arena.deinit();
+                const req_alloc = req_arena.allocator();
+
+                const oai_messages = try messagesToOpenAIMessages(req_alloc, messages);
+                const tools = if (config.tools) |t| try mapOpenAITools(req_alloc, t) else null;
+
+                var acc = openai_mod.StreamAccumulator.init(req_alloc, on_text.context, on_text.onText);
+                o.chatCompletionStream(model, oai_messages, mapOpenAICompletionConfig(config, tools), &acc, openai_mod.StreamAccumulator.onEvent) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.ApiError,
+                };
+                if (acc.err) |e| return e;
+                return openAiChatResult(o.allocator, try acc.response());
+            },
+            .gemini, .vertex => |g| {
+                var req_arena = std.heap.ArenaAllocator.init(g.allocator);
+                defer req_arena.deinit();
+                const req_alloc = req_arena.allocator();
+
+                const separated = try separateSystemMessages(req_alloc, messages);
+                const contents = separated.contents;
+                const sys_instruction: ?gemini_types.Content = if (separated.system_text) |sys|
+                    gemini_types.Content{ .parts = @as([]const gemini_types.Part, &.{.{ .text = sys }}) }
+                else
+                    null;
+                const tools = if (config.tools) |t| try mapGeminiTools(req_alloc, t) else null;
+
+                var acc = gemini_mod.StreamAccumulator.init(req_alloc, on_text.context, on_text.onText);
+                g.generateContentStream(model, contents, mapGeminiGenerationConfig(model, config), .{
+                    .systemInstruction = sys_instruction,
+                    .tools = tools,
+                    .toolConfig = mapToolChoiceToGemini(config.tool_choice),
+                }, &acc, gemini_mod.StreamAccumulator.onEvent) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.ApiError,
+                };
+                if (acc.err) |e| return e;
+                return geminiResult(g.allocator, try acc.response());
+            },
+            // Native OpenAI streams via the Responses API: Chat Completions 400s
+            // on function tools + reasoning for the gpt-5 family, and the buffered
+            // path already uses Responses, so streaming stays consistent with it.
+            .openai => |o| {
+                var req_arena = std.heap.ArenaAllocator.init(o.allocator);
+                defer req_arena.deinit();
+                const req_alloc = req_arena.allocator();
+
+                const input = try messagesToOpenAIResponsesInput(req_alloc, messages);
+                const tools = if (config.tools) |t| try mapOpenAIResponsesTools(req_alloc, t) else null;
+
+                var acc = openai_mod.ResponsesStreamAccumulator.init(req_alloc, on_text.context, on_text.onText);
+                o.createResponseStream(.{
+                    .model = model,
+                    .input = input,
+                    .tools = tools,
+                    .tool_choice = mapToolChoiceToOpenAI(config.tool_choice),
+                    .reasoning = if (config.effort) |tl| .{ .effort = mapEffortToOpenAI(tl) } else null,
+                    .max_output_tokens = config.max_tokens,
+                    .temperature = config.temperature,
+                }, &acc, openai_mod.ResponsesStreamAccumulator.onEvent) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.ApiError,
+                };
+                if (acc.err) |e| return e;
+                return openAiResponsesResult(o.allocator, try acc.response());
+            },
+            // Ollama's native `/api/chat` is non-streaming; fall back to the
+            // buffered call and emit the whole text in one delta so the caller
+            // still sees it.
+            .ollama => {
+                const result = try self.generateContent(model, messages, config);
+                if (result.text) |t| {
+                    if (t.len > 0) on_text.call(t);
+                }
+                return result;
+            },
+        }
+    }
+
     /// Generate an embedding for a text string.
     pub fn embed(
         self: Client,
@@ -991,6 +1000,10 @@ pub const Client = union(enum) {
         /// HTTP request still runs to completion before the check fires
         /// (the loop owns iteration, not the HTTP layer).
         cancel: ?CancelHook = null,
+        /// When set, each turn streams the model response, forwarding text
+        /// deltas to this hook as they arrive while still accumulating tool
+        /// calls into the buffered per-turn result. Null runs the buffered path.
+        stream: ?TextDeltaHook = null,
 
         pub fn cancelRequested(self: RunToolsConfig) bool {
             return if (self.cancel) |c| c.check() else false;
@@ -1003,6 +1016,19 @@ pub const Client = union(enum) {
 
         pub fn check(self: CancelHook) bool {
             return self.checkFn(self.context);
+        }
+    };
+
+    /// Fired with each incremental assistant-text delta as it streams from the
+    /// model. When set on `RunToolsConfig.stream`, `runTools` drives a streaming
+    /// request per turn (reassembling tool calls internally) instead of the
+    /// buffered path; when null, behavior is unchanged.
+    pub const TextDeltaHook = struct {
+        context: *anyopaque,
+        onText: *const fn (context: *anyopaque, delta: []const u8) void,
+
+        pub fn call(self: TextDeltaHook, delta: []const u8) void {
+            self.onText(self.context, delta);
         }
     };
 
@@ -1062,15 +1088,27 @@ pub const Client = union(enum) {
                 cancelled = true;
                 break;
             }
-            var gen_result = try self.generateContent(model, messages.items, .{
+            const gen_config: GenerationConfig = .{
                 .tools = config.tools,
                 .max_tokens = config.max_tokens,
                 .tool_choice = config.tool_choice,
                 .temperature = config.temperature,
                 .effort = config.effort,
-            });
+            };
+            var gen_result = if (config.stream) |hook|
+                try self.generateContentStreamAccumulate(model, messages.items, gen_config, hook)
+            else
+                try self.generateContent(model, messages.items, gen_config);
             defer gen_result.deinit();
             total_usage.add(gen_result.usage);
+
+            // A streamed turn returns partial data on mid-stream cancel rather
+            // than erroring; catch it here so the loop stops instead of treating
+            // the fragment as a finished answer.
+            if (config.cancelRequested()) {
+                cancelled = true;
+                break;
+            }
 
             if (gen_result.tool_calls) |tool_calls| {
                 const duped_calls = try dupeToolCalls(data_alloc, tool_calls);
@@ -2089,6 +2127,131 @@ fn mapOllamaUsage(response: ollama_native.ChatResponse) Usage {
         else
             null,
     };
+}
+
+/// Map a Gemini `GenerateContentResponse` (buffered or stream-reassembled) into
+/// the unified `GenerateResult`. Shared by the buffered and streaming arms.
+fn geminiResult(alloc: std.mem.Allocator, response: gemini_types.GenerateContentResponse) Client.Error!GenerateResult {
+    var result = GenerateResult.init(alloc);
+    errdefer result.deinit();
+    const ra = result.arena.allocator();
+    if (response.text()) |t| result.text = try ra.dupe(u8, t);
+    result.finish_reason = mapGeminiFinishReason(response);
+    result.usage = mapGeminiUsage(response);
+    if (response.candidates) |candidates| {
+        if (candidates.len > 0) {
+            if (candidates[0].content) |content| {
+                var tool_calls: std.ArrayList(ToolCall) = .empty;
+                for (content.parts) |p| {
+                    const fc = p.functionCall orelse continue;
+                    try tool_calls.append(ra, .{
+                        .id = if (fc.id) |id| try ra.dupe(u8, id) else "",
+                        .name = if (fc.name) |n| try ra.dupe(u8, n) else "",
+                        .arguments = if (fc.args) |v| try json.dupeValue(ra, v) else null,
+                        .thought_signature = if (p.thoughtSignature) |ts| try ra.dupe(u8, ts) else null,
+                    });
+                }
+                if (tool_calls.items.len > 0) result.tool_calls = try tool_calls.toOwnedSlice(ra);
+            }
+        }
+    }
+    return result;
+}
+
+/// Map an Anthropic `MessageResponse` (buffered or stream-reassembled) into the
+/// unified `GenerateResult`. Shared by the buffered and streaming arms so both
+/// extract text/usage/tool_use identically.
+fn anthropicResult(alloc: std.mem.Allocator, response: anthropic_types.MessageResponse) Client.Error!GenerateResult {
+    var result = GenerateResult.init(alloc);
+    errdefer result.deinit();
+    const ra = result.arena.allocator();
+    if (response.text()) |t| result.text = try ra.dupe(u8, t);
+    result.finish_reason = mapAnthropicFinishReason(response);
+    result.usage = mapAnthropicUsage(response);
+    if (response.content) |blocks| {
+        var tool_calls: std.ArrayList(ToolCall) = .empty;
+        for (blocks) |block| {
+            const t = block.type orelse continue;
+            if (!std.mem.eql(u8, t, "tool_use")) continue;
+            try tool_calls.append(ra, .{
+                .id = if (block.id) |id| try ra.dupe(u8, id) else "",
+                .name = if (block.name) |n| try ra.dupe(u8, n) else "",
+                .arguments = if (block.input) |v| try json.dupeValue(ra, v) else null,
+            });
+        }
+        if (tool_calls.items.len > 0) result.tool_calls = try tool_calls.toOwnedSlice(ra);
+    }
+    return result;
+}
+
+/// Map an OpenAI-compatible `ChatCompletionResponse` (buffered or
+/// stream-reassembled) into the unified `GenerateResult`. Shared by the buffered
+/// and streaming arms of the Chat Completions providers.
+fn openAiChatResult(alloc: std.mem.Allocator, response: openai_types.ChatCompletionResponse) Client.Error!GenerateResult {
+    var result = GenerateResult.init(alloc);
+    errdefer result.deinit();
+    const ga = result.arena.allocator();
+    if (response.text()) |t| {
+        if (t.len > 0) result.text = try ga.dupe(u8, t);
+    }
+    result.finish_reason = mapOpenAIFinishReason(response);
+    result.usage = mapOpenAIUsage(response);
+
+    extract: {
+        const choices = response.choices orelse break :extract;
+        if (choices.len == 0) break :extract;
+        const msg = choices[0].message orelse break :extract;
+        const calls = msg.tool_calls orelse break :extract;
+
+        var tool_calls: std.ArrayList(ToolCall) = .empty;
+        for (calls) |call| {
+            const f = call.function orelse continue;
+            // Chat Completions returns arguments as a JSON string.
+            const args_val: ?std.json.Value = if (f.arguments) |a|
+                (std.json.parseFromSliceLeaky(std.json.Value, ga, a, .{}) catch null)
+            else
+                null;
+            try tool_calls.append(ga, .{
+                .id = if (call.id) |id| try ga.dupe(u8, id) else "",
+                .name = if (f.name) |n| try ga.dupe(u8, n) else "",
+                .arguments = args_val,
+            });
+        }
+        if (tool_calls.items.len > 0) result.tool_calls = try tool_calls.toOwnedSlice(ga);
+    }
+    return result;
+}
+
+/// Map an OpenAI `ResponsesResponse` (buffered or stream-reassembled) into the
+/// unified `GenerateResult`. Shared by the buffered and streaming `.openai` arms.
+fn openAiResponsesResult(alloc: std.mem.Allocator, response: openai_types.ResponsesResponse) Client.Error!GenerateResult {
+    var result = GenerateResult.init(alloc);
+    errdefer result.deinit();
+    const ga = result.arena.allocator();
+    if (response.text()) |t| {
+        if (t.len > 0) result.text = try ga.dupe(u8, t);
+    }
+    result.finish_reason = mapOpenAIResponsesFinishReason(response);
+    result.usage = mapOpenAIResponsesUsage(response);
+
+    if (response.output) |items| {
+        var tool_calls: std.ArrayList(ToolCall) = .empty;
+        for (items) |item| {
+            const item_type = item.type orelse continue;
+            if (!std.mem.eql(u8, item_type, "function_call")) continue;
+            const args_val: ?std.json.Value = if (item.arguments) |a|
+                (std.json.parseFromSliceLeaky(std.json.Value, ga, a, .{}) catch null)
+            else
+                null;
+            try tool_calls.append(ga, .{
+                .id = if (item.call_id) |id| try ga.dupe(u8, id) else "",
+                .name = if (item.name) |n| try ga.dupe(u8, n) else "",
+                .arguments = args_val,
+            });
+        }
+        if (tool_calls.items.len > 0) result.tool_calls = try tool_calls.toOwnedSlice(ga);
+    }
+    return result;
 }
 
 fn mapAnthropicStopReason(reason: anthropic_types.StopReason) FinishReason {

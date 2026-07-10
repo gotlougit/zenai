@@ -10,6 +10,7 @@ const ChatCompletionRequest = types.ChatCompletionRequest;
 const ChatCompletionResponse = types.ChatCompletionResponse;
 const ResponsesRequest = types.ResponsesRequest;
 const ResponsesResponse = types.ResponsesResponse;
+const ResponseStreamEvent = types.ResponseStreamEvent;
 
 /// OpenAI API client. Provides access to chat completions, embeddings,
 /// and model management.
@@ -221,6 +222,99 @@ pub fn createResponse(self: *Client, request: ResponsesRequest) ApiError!Respons
     return self.fetchPost(url, request, ResponsesResponse);
 }
 
+/// Stream a model response via the Responses API (`POST /responses`). The
+/// `callback` fires per SSE event; `request.stream` is forced on. Unlike Chat
+/// Completions, this endpoint supports function tools together with reasoning
+/// on the gpt-5 family, so native OpenAI streams through here.
+pub fn createResponseStream(
+    self: *Client,
+    request: ResponsesRequest,
+    context: anytype,
+    callback: *const fn (@TypeOf(context), ResponseStreamEvent) void,
+) StreamError!void {
+    if (self.api_key.len == 0) return error.MissingApiKey;
+
+    const url = try std.fmt.allocPrint(self.allocator, "{s}/responses", .{self.base_url});
+    defer self.allocator.free(url);
+
+    var req_body = request;
+    req_body.stream = true;
+
+    var payload_buf: std.Io.Writer.Allocating = .init(self.allocator);
+    defer payload_buf.deinit();
+    std.json.Stringify.value(req_body, .{ .emit_null_optional_fields = false }, &payload_buf.writer) catch
+        return error.OutOfMemory;
+    const payload = payload_buf.written();
+
+    var hdr_buf: [4]std.http.Header = undefined;
+    const auth = try self.authHeaders(&hdr_buf);
+    const uri = try std.Uri.parse(url);
+    var req = try self.http_client.request(.POST, uri, .{
+        .extra_headers = auth,
+        .headers = .{
+            .content_type = .{ .override = "application/json" },
+            // Read the SSE stream as plain text: the raw reader does not
+            // decompress, so a gzip'd body would arrive as unparseable bytes.
+            .accept_encoding = .{ .override = "identity" },
+        },
+        .redirect_behavior = .init(5),
+    });
+    defer req.deinit();
+
+    // Let a SIGINT abort the blocking SSE read; poison the connection on any
+    // failed/aborted exchange so it isn't pooled with unknown framing.
+    var guard = http.armInterrupt(self.interrupt, &req);
+    defer guard.deinit();
+    errdefer guard.poison();
+
+    req.transfer_encoding = .{ .content_length = payload.len };
+    var bw = try req.sendBodyUnflushed(&.{});
+    try bw.writer.writeAll(payload);
+    try bw.end();
+    try req.connection.?.flush();
+
+    var redirect_buf: [0]u8 = undefined;
+    var response = try req.receiveHead(&redirect_buf);
+
+    const status_code: u10 = @intFromEnum(response.head.status);
+    if (status_code < 200 or status_code >= 300) {
+        self.setErrorDetail(status_code, "");
+        return error.ApiError;
+    }
+
+    const transfer_buf = try self.allocator.alloc(u8, 256 * 1024);
+    defer self.allocator.free(transfer_buf);
+    const reader = response.reader(transfer_buf);
+
+    while (true) {
+        const line = reader.takeDelimiter('\n') catch |err| switch (err) {
+            error.StreamTooLong => return error.InvalidSseData,
+            error.ReadFailed => {
+                guard.poison();
+                return;
+            },
+        } orelse return;
+
+        const trimmed = std.mem.trimRight(u8, line, "\r");
+        if (trimmed.len == 0) continue;
+
+        // Skip event: lines — the type is repeated in the data JSON.
+        if (std.mem.startsWith(u8, trimmed, "event: ")) continue;
+
+        if (std.mem.startsWith(u8, trimmed, "data: ")) {
+            const json_data = trimmed["data: ".len..];
+            if (std.mem.eql(u8, json_data, "[DONE]")) return;
+
+            const parsed = std.json.parseFromSlice(ResponseStreamEvent, self.allocator, json_data, .{ .ignore_unknown_fields = true }) catch |err| {
+                std.log.err("OpenAI responses streaming: failed to parse SSE chunk: {}", .{err});
+                return error.InvalidSseData;
+            };
+            defer parsed.deinit();
+            callback(context, parsed.value);
+        }
+    }
+}
+
 // --- Streaming ---
 
 pub const StreamError = error{
@@ -248,6 +342,8 @@ pub fn chatCompletionStream(
         .model = model,
         .messages = messages,
         .stream = true,
+        // Ask for the trailing usage chunk so streamed turns still report cost.
+        .stream_options = .{ .include_usage = true },
         .temperature = config.temperature,
         .max_completion_tokens = config.max_tokens,
         .top_p = config.top_p,
@@ -273,6 +369,9 @@ pub fn chatCompletionStream(
         .extra_headers = auth,
         .headers = .{
             .content_type = .{ .override = "application/json" },
+            // Read the SSE stream as plain text: the raw reader does not
+            // decompress, so a gzip'd body would arrive as unparseable bytes.
+            .accept_encoding = .{ .override = "identity" },
         },
         .redirect_behavior = .init(5),
     });
@@ -343,6 +442,182 @@ pub fn chatCompletionStreamFromText(
     const messages = [_]Message{.{ .role = .user, .content = prompt }};
     return self.chatCompletionStream(model, &messages, config, context, callback);
 }
+
+/// Reassembles a streamed chat completion into the same `ChatCompletionResponse`
+/// the non-streaming `chatCompletion` returns, correlating tool-call argument
+/// fragments by their delta index and firing `on_text_fn` per content delta.
+/// Drive it by passing `&acc` and `onEvent` to `chatCompletionStream`, then call
+/// `response()`. All storage lives in `arena`.
+pub const StreamAccumulator = struct {
+    arena: std.mem.Allocator,
+    on_text_ctx: *anyopaque,
+    on_text_fn: *const fn (*anyopaque, []const u8) void,
+    content: std.ArrayListUnmanaged(u8) = .empty,
+    calls: std.ArrayListUnmanaged(CallFragment) = .empty,
+    finish_reason: ?types.FinishReason = null,
+    usage: ?types.Usage = null,
+    err: ?error{OutOfMemory} = null,
+
+    const CallFragment = struct {
+        index: i32,
+        id: std.ArrayListUnmanaged(u8) = .empty,
+        name: std.ArrayListUnmanaged(u8) = .empty,
+        args: std.ArrayListUnmanaged(u8) = .empty,
+    };
+
+    pub fn init(
+        arena: std.mem.Allocator,
+        on_text_ctx: *anyopaque,
+        on_text_fn: *const fn (*anyopaque, []const u8) void,
+    ) StreamAccumulator {
+        return .{ .arena = arena, .on_text_ctx = on_text_ctx, .on_text_fn = on_text_fn };
+    }
+
+    pub fn onEvent(self: *StreamAccumulator, chunk: ChatCompletionResponse) void {
+        self.handle(chunk) catch |e| {
+            self.err = e;
+        };
+    }
+
+    fn slot(self: *StreamAccumulator, idx: i32) error{OutOfMemory}!*CallFragment {
+        for (self.calls.items) |*c| {
+            if (c.index == idx) return c;
+        }
+        try self.calls.append(self.arena, .{ .index = idx });
+        return &self.calls.items[self.calls.items.len - 1];
+    }
+
+    fn handle(self: *StreamAccumulator, chunk: ChatCompletionResponse) error{OutOfMemory}!void {
+        // The final `include_usage` chunk carries usage with no choices.
+        if (chunk.usage != null) self.usage = chunk.usage;
+        const choices = chunk.choices orelse return;
+        if (choices.len == 0) return;
+        const c0 = choices[0];
+        if (c0.finish_reason) |fr| self.finish_reason = fr;
+        const delta = c0.delta orelse return;
+        if (delta.content) |txt| {
+            if (txt.len > 0) {
+                try self.content.appendSlice(self.arena, txt);
+                self.on_text_fn(self.on_text_ctx, txt);
+            }
+        }
+        if (delta.tool_calls) |tcs| {
+            for (tcs, 0..) |tc, i| {
+                const call = try self.slot(tc.index orelse @intCast(i));
+                if (tc.id) |id| {
+                    call.id.clearRetainingCapacity();
+                    try call.id.appendSlice(self.arena, id);
+                }
+                if (tc.function) |f| {
+                    if (f.name) |n| {
+                        call.name.clearRetainingCapacity();
+                        try call.name.appendSlice(self.arena, n);
+                    }
+                    if (f.arguments) |a| try call.args.appendSlice(self.arena, a);
+                }
+            }
+        }
+    }
+
+    /// Assemble the accumulated deltas into a `ChatCompletionResponse`. Call
+    /// once, after the stream completes and `err` is clear.
+    pub fn response(self: *StreamAccumulator) error{OutOfMemory}!ChatCompletionResponse {
+        var tool_calls: std.ArrayListUnmanaged(types.ToolCall) = .empty;
+        for (self.calls.items) |c| {
+            try tool_calls.append(self.arena, .{
+                .id = c.id.items,
+                .type = "function",
+                .function = .{ .name = c.name.items, .arguments = c.args.items },
+            });
+        }
+        const message = types.Message{
+            .role = .assistant,
+            .content = if (self.content.items.len > 0) self.content.items else null,
+            .tool_calls = if (tool_calls.items.len > 0) tool_calls.items else null,
+        };
+        const choices = try self.arena.dupe(types.Choice, &.{.{ .index = 0, .message = message, .finish_reason = self.finish_reason }});
+        return .{ .choices = choices, .usage = self.usage };
+    }
+};
+
+/// Reassembles a streamed Responses-API response into the same `ResponsesResponse`
+/// the non-streaming `createResponse` returns. Text arrives as `output_text.delta`
+/// events (forwarded to `on_text_fn`); each `output_item.done` carries a complete
+/// `function_call` item; the terminal `response.completed`/`incomplete` event
+/// carries usage and status. All storage lives in `arena`.
+pub const ResponsesStreamAccumulator = struct {
+    arena: std.mem.Allocator,
+    on_text_ctx: *anyopaque,
+    on_text_fn: *const fn (*anyopaque, []const u8) void,
+    text: std.ArrayListUnmanaged(u8) = .empty,
+    calls: std.ArrayListUnmanaged(types.ResponseOutputItem) = .empty,
+    usage: ?types.ResponsesUsage = null,
+    incomplete_reason: ?[]const u8 = null,
+    err: ?error{OutOfMemory} = null,
+
+    pub fn init(
+        arena: std.mem.Allocator,
+        on_text_ctx: *anyopaque,
+        on_text_fn: *const fn (*anyopaque, []const u8) void,
+    ) ResponsesStreamAccumulator {
+        return .{ .arena = arena, .on_text_ctx = on_text_ctx, .on_text_fn = on_text_fn };
+    }
+
+    pub fn onEvent(self: *ResponsesStreamAccumulator, event: ResponseStreamEvent) void {
+        self.handle(event) catch |e| {
+            self.err = e;
+        };
+    }
+
+    fn handle(self: *ResponsesStreamAccumulator, event: ResponseStreamEvent) error{OutOfMemory}!void {
+        const t = event.type orelse return;
+        if (std.mem.eql(u8, t, "response.output_text.delta")) {
+            if (event.delta) |d| {
+                if (d.len > 0) {
+                    try self.text.appendSlice(self.arena, d);
+                    self.on_text_fn(self.on_text_ctx, d);
+                }
+            }
+        } else if (std.mem.eql(u8, t, "response.output_item.done")) {
+            const item = event.item orelse return;
+            const it = item.type orelse return;
+            if (std.mem.eql(u8, it, "function_call")) {
+                // Strings point into the transient parsed event; dupe them.
+                try self.calls.append(self.arena, .{
+                    .type = "function_call",
+                    .call_id = if (item.call_id) |c| try self.arena.dupe(u8, c) else null,
+                    .name = if (item.name) |n| try self.arena.dupe(u8, n) else null,
+                    .arguments = if (item.arguments) |a| try self.arena.dupe(u8, a) else null,
+                });
+            }
+        } else if (std.mem.eql(u8, t, "response.completed") or std.mem.eql(u8, t, "response.incomplete")) {
+            if (event.response) |r| {
+                // Usage is all ints — a value copy outlives the event; the
+                // incomplete reason is a string and must be duped.
+                if (r.usage) |u| self.usage = u;
+                if (r.incomplete_details) |d| {
+                    self.incomplete_reason = if (d.reason) |rr| try self.arena.dupe(u8, rr) else null;
+                }
+            }
+        }
+    }
+
+    /// Assemble the accumulated deltas into a `ResponsesResponse`. Call once,
+    /// after the stream completes and `err` is clear.
+    pub fn response(self: *ResponsesStreamAccumulator) error{OutOfMemory}!ResponsesResponse {
+        var output: std.ArrayListUnmanaged(types.ResponseOutputItem) = .empty;
+        if (self.text.items.len > 0) {
+            const content = try self.arena.dupe(types.ResponseOutputContent, &.{.{ .type = "output_text", .text = self.text.items }});
+            try output.append(self.arena, .{ .type = "message", .role = "assistant", .content = content });
+        }
+        try output.appendSlice(self.arena, self.calls.items);
+        return .{
+            .output = if (output.items.len > 0) output.items else null,
+            .usage = self.usage,
+            .incomplete_details = if (self.incomplete_reason) |r| .{ .reason = r } else null,
+        };
+    }
+};
 
 // --- Embeddings ---
 
@@ -485,4 +760,81 @@ test "isChatModel drops non-chat" {
     try std.testing.expect(!isChatModel(T.m("gpt-4o-realtime-preview")));
     try std.testing.expect(!isChatModel(T.m("gpt-4o-transcribe")));
     try std.testing.expect(!isChatModel(T.m("gpt-4o-mini-tts")));
+}
+
+const TextProbe = struct {
+    count: usize = 0,
+    text: std.ArrayListUnmanaged(u8) = .empty,
+
+    fn cb(ptr: *anyopaque, delta: []const u8) void {
+        const self: *TextProbe = @ptrCast(@alignCast(ptr));
+        self.count += 1;
+        self.text.appendSlice(std.testing.allocator, delta) catch {};
+    }
+};
+
+test "StreamAccumulator reassembles chat text and correlates tool-call fragments by index" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var probe = TextProbe{};
+    defer probe.text.deinit(std.testing.allocator);
+
+    var acc = StreamAccumulator.init(arena.allocator(), &probe, TextProbe.cb);
+    const chunks = [_]ChatCompletionResponse{
+        .{ .choices = &.{.{ .index = 0, .delta = .{ .content = "Hel" } }} },
+        .{ .choices = &.{.{ .index = 0, .delta = .{ .content = "lo" } }} },
+        .{ .choices = &.{.{ .index = 0, .delta = .{ .tool_calls = &.{.{ .index = 0, .id = "call_1", .type = "function", .function = .{ .name = "search", .arguments = "" } }} } }} },
+        .{ .choices = &.{.{ .index = 0, .delta = .{ .tool_calls = &.{.{ .index = 0, .function = .{ .arguments = "{\"q\":" } }} } }} },
+        .{ .choices = &.{.{ .index = 0, .delta = .{ .tool_calls = &.{.{ .index = 0, .function = .{ .arguments = "\"dogs\"}" } }} } }} },
+        .{ .choices = &.{.{ .index = 0, .delta = .{}, .finish_reason = .tool_calls }} },
+        .{ .choices = &.{}, .usage = .{ .prompt_tokens = 5, .completion_tokens = 7, .total_tokens = 12 } },
+    };
+    for (chunks) |c| acc.onEvent(c);
+    try std.testing.expect(acc.err == null);
+
+    const resp = try acc.response();
+    try std.testing.expectEqual(@as(usize, 2), probe.count);
+    try std.testing.expectEqualStrings("Hello", resp.text().?);
+    try std.testing.expectEqual(@as(?i32, 7), resp.usage.?.completion_tokens);
+
+    const tc = resp.firstToolCall().?;
+    try std.testing.expectEqualStrings("call_1", tc.id.?);
+    try std.testing.expectEqualStrings("search", tc.function.?.name.?);
+    try std.testing.expectEqualStrings("{\"q\":\"dogs\"}", tc.function.?.arguments.?);
+}
+
+test "ResponsesStreamAccumulator reassembles text and a completed function-call item" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var probe = TextProbe{};
+    defer probe.text.deinit(std.testing.allocator);
+
+    var acc = ResponsesStreamAccumulator.init(arena.allocator(), &probe, TextProbe.cb);
+    const events = [_]ResponseStreamEvent{
+        .{ .type = "response.output_text.delta", .delta = "Search" },
+        .{ .type = "response.output_text.delta", .delta = "ing." },
+        .{ .type = "response.output_item.done", .item = .{ .type = "function_call", .call_id = "call_9", .name = "search", .arguments = "{\"q\":\"birds\"}" } },
+        .{ .type = "response.completed", .response = .{
+            .status = "completed",
+            .usage = .{ .input_tokens = 8, .output_tokens = 4, .total_tokens = 12 },
+        } },
+    };
+    for (events) |ev| acc.onEvent(ev);
+    try std.testing.expect(acc.err == null);
+
+    const resp = try acc.response();
+    try std.testing.expectEqual(@as(usize, 2), probe.count);
+    try std.testing.expectEqualStrings("Searching.", resp.text().?);
+    try std.testing.expectEqual(@as(?i32, 4), resp.usage.?.output_tokens);
+
+    const items = resp.output.?;
+    var fc: ?types.ResponseOutputItem = null;
+    for (items) |it| {
+        if (it.type) |t| if (std.mem.eql(u8, t, "function_call")) {
+            fc = it;
+        };
+    }
+    try std.testing.expectEqualStrings("call_9", fc.?.call_id.?);
+    try std.testing.expectEqualStrings("search", fc.?.name.?);
+    try std.testing.expectEqualStrings("{\"q\":\"birds\"}", fc.?.arguments.?);
 }
