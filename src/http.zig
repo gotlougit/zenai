@@ -217,8 +217,7 @@ pub const SseError = error{
 
 /// POST `payload` and stream the Server-Sent Events response, invoking
 /// `callback` with each parsed `data:` event of type `EventT` until the stream
-/// ends. Shared by every provider's streaming client — they differ only in URL,
-/// auth headers, payload, and event type.
+/// ends.
 ///
 /// Requests `identity` encoding: the line reader does not decompress, so a
 /// gzip'd body would arrive as unparseable bytes. `error_handler` is the
