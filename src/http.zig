@@ -206,6 +206,106 @@ fn fetchInterruptible(
     return response.head.status;
 }
 
+/// Error set returned by `streamSse`. Each provider's `StreamError` is a
+/// superset (it adds `MissingApiKey`, which callers check before streaming).
+pub const SseError = error{
+    ApiError,
+    InvalidSseData,
+} || std.http.Client.RequestError || std.http.Client.Request.ReceiveHeadError ||
+    std.Io.Writer.Error || std.Io.Reader.DelimiterError ||
+    std.json.ParseError(std.json.Scanner) || std.mem.Allocator.Error || std.Uri.ParseError;
+
+/// POST `payload` and stream the Server-Sent Events response, invoking
+/// `callback` with each parsed `data:` event of type `EventT` until the stream
+/// ends. Shared by every provider's streaming client — they differ only in URL,
+/// auth headers, payload, and event type.
+///
+/// Requests `identity` encoding: the line reader does not decompress, so a
+/// gzip'd body would arrive as unparseable bytes. `error_handler` is the
+/// provider client; its `interrupt` field (if present) is armed around the
+/// blocking read so a cross-thread `Interrupt.fire` can abort it, and
+/// `setErrorDetail(status, "")` records a non-2xx status before returning
+/// `error.ApiError` — mirroring `fetchJsonWithRetry`.
+pub fn streamSse(
+    allocator: std.mem.Allocator,
+    http_client: *std.http.Client,
+    url: []const u8,
+    extra_headers: []const std.http.Header,
+    payload: []const u8,
+    comptime EventT: type,
+    error_handler: anytype,
+    context: anytype,
+    callback: *const fn (@TypeOf(context), EventT) void,
+) SseError!void {
+    const interrupt: ?*Interrupt = if (@hasField(@TypeOf(error_handler.*), "interrupt"))
+        error_handler.interrupt
+    else
+        null;
+
+    const uri = try std.Uri.parse(url);
+    var req = try http_client.request(.POST, uri, .{
+        .extra_headers = extra_headers,
+        .headers = .{
+            .content_type = .{ .override = "application/json" },
+            .accept_encoding = .{ .override = "identity" },
+        },
+        .redirect_behavior = .init(5),
+    });
+    defer req.deinit();
+
+    // Let a SIGINT abort the blocking SSE read; poison the connection on any
+    // failed/aborted exchange so it isn't pooled with unknown framing.
+    var guard = armInterrupt(interrupt, &req);
+    defer guard.deinit();
+    errdefer guard.poison();
+
+    req.transfer_encoding = .{ .content_length = payload.len };
+    var bw = try req.sendBodyUnflushed(&.{});
+    try bw.writer.writeAll(payload);
+    try bw.end();
+    try req.connection.?.flush();
+
+    var redirect_buf: [0]u8 = undefined;
+    var response = try req.receiveHead(&redirect_buf);
+
+    const status_code: u10 = @intFromEnum(response.head.status);
+    if (status_code < 200 or status_code >= 300) {
+        error_handler.setErrorDetail(status_code, "");
+        return error.ApiError;
+    }
+
+    const transfer_buf = try allocator.alloc(u8, 256 * 1024);
+    defer allocator.free(transfer_buf);
+    const reader = response.reader(transfer_buf);
+
+    while (true) {
+        const line = reader.takeDelimiter('\n') catch |err| switch (err) {
+            error.StreamTooLong => return error.InvalidSseData,
+            error.ReadFailed => {
+                guard.poison();
+                return;
+            },
+        } orelse return;
+
+        const trimmed = std.mem.trimRight(u8, line, "\r");
+        if (trimmed.len == 0) continue;
+        // `event:` lines carry only the type, which the data JSON repeats.
+        if (std.mem.startsWith(u8, trimmed, "event: ")) continue;
+        if (!std.mem.startsWith(u8, trimmed, "data: ")) continue;
+
+        const json_data = trimmed["data: ".len..];
+        // OpenAI terminates with a `[DONE]` sentinel; others just EOF.
+        if (std.mem.eql(u8, json_data, "[DONE]")) return;
+
+        const parsed = std.json.parseFromSlice(EventT, allocator, json_data, .{ .ignore_unknown_fields = true }) catch |err| {
+            std.log.err("SSE stream: failed to parse chunk: {}", .{err});
+            return error.InvalidSseData;
+        };
+        defer parsed.deinit();
+        callback(context, parsed.value);
+    }
+}
+
 /// Extract an owned copy of `error.message` from a provider JSON error body, or
 /// null if absent or unparseable. Caller frees the result with `allocator`.
 ///

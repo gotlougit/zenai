@@ -329,69 +329,9 @@ pub fn generateContentStream(
     defer payload_buf.deinit();
     std.json.Stringify.value(req_body, .{ .emit_null_optional_fields = false }, &payload_buf.writer) catch
         return error.OutOfMemory;
-    const payload = payload_buf.written();
 
-    const uri = try std.Uri.parse(url);
     const auth = [1]std.http.Header{try self.authHeader()};
-    var req = try self.http_client.request(.POST, uri, .{
-        .extra_headers = &auth,
-        .headers = .{
-            .content_type = .{ .override = "application/json" },
-            // Read the SSE stream as plain text: the raw reader does not
-            // decompress, so a gzip'd body would arrive as unparseable bytes.
-            .accept_encoding = .{ .override = "identity" },
-        },
-        .redirect_behavior = .init(5),
-    });
-    defer req.deinit();
-
-    // Let a SIGINT abort the blocking SSE read; poison the connection on any
-    // failed/aborted exchange so it isn't pooled with unknown framing.
-    var guard = http.armInterrupt(self.interrupt, &req);
-    defer guard.deinit();
-    errdefer guard.poison();
-
-    req.transfer_encoding = .{ .content_length = payload.len };
-    var bw = try req.sendBodyUnflushed(&.{});
-    try bw.writer.writeAll(payload);
-    try bw.end();
-    try req.connection.?.flush();
-
-    var redirect_buf: [0]u8 = undefined;
-    var response = try req.receiveHead(&redirect_buf);
-
-    const status_code: u10 = @intFromEnum(response.head.status);
-    if (status_code < 200 or status_code >= 300) {
-        self.setErrorDetail(status_code, "");
-        return error.ApiError;
-    }
-
-    const transfer_buf = try self.allocator.alloc(u8, 256 * 1024);
-    defer self.allocator.free(transfer_buf);
-    const reader = response.reader(transfer_buf);
-
-    while (true) {
-        const line = reader.takeDelimiter('\n') catch |err| switch (err) {
-            error.StreamTooLong => return error.InvalidSseData,
-            error.ReadFailed => {
-                guard.poison();
-                return;
-            },
-        } orelse return;
-
-        const trimmed = std.mem.trimRight(u8, line, "\r");
-        if (trimmed.len == 0) continue;
-
-        if (std.mem.startsWith(u8, trimmed, "data: ")) {
-            const json_data = trimmed["data: ".len..];
-            const parsed = std.json.parseFromSlice(GenerateContentResponse, self.allocator, json_data, .{ .ignore_unknown_fields = true }) catch |err| {
-                std.log.err("Gemini streaming: failed to parse SSE chunk: {}", .{err});
-                return error.InvalidSseData;
-            };
-            defer parsed.deinit();
-            callback(context, parsed.value);
-        }
-    }
+    return http.streamSse(self.allocator, &self.http_client, url, &auth, payload_buf.written(), GenerateContentResponse, self, context, callback);
 }
 
 /// Convenience: stream content generation from a single text prompt.
