@@ -317,6 +317,110 @@ pub fn createMessageStreamFromText(
     return self.createMessageStream(model, &messages, max_tokens, config, context, callback);
 }
 
+/// Reassembles a streamed Messages response into the same `MessageResponse` the
+/// non-streaming `createMessage` returns, firing `on_text_fn` for each text
+/// delta as it arrives. Drive it by passing `&acc` and `onEvent` to
+/// `createMessageStream`, then call `response()`. All storage lives in `arena`.
+pub const StreamAccumulator = struct {
+    arena: std.mem.Allocator,
+    on_text_ctx: *anyopaque,
+    on_text_fn: *const fn (*anyopaque, []const u8) void,
+    text: std.ArrayListUnmanaged(u8) = .empty,
+    tool_blocks: std.ArrayListUnmanaged(ToolBlock) = .empty,
+    stop_reason: ?types.StopReason = null,
+    usage: types.Usage = .{},
+    err: ?error{OutOfMemory} = null,
+
+    const ToolBlock = struct {
+        index: i32,
+        id: []const u8,
+        name: []const u8,
+        json: std.ArrayListUnmanaged(u8) = .empty,
+    };
+
+    pub fn init(
+        arena: std.mem.Allocator,
+        on_text_ctx: *anyopaque,
+        on_text_fn: *const fn (*anyopaque, []const u8) void,
+    ) StreamAccumulator {
+        return .{ .arena = arena, .on_text_ctx = on_text_ctx, .on_text_fn = on_text_fn };
+    }
+
+    pub fn onEvent(self: *StreamAccumulator, event: StreamEvent) void {
+        self.handle(event) catch |e| {
+            self.err = e;
+        };
+    }
+
+    fn handle(self: *StreamAccumulator, event: StreamEvent) error{OutOfMemory}!void {
+        const et = event.type orelse return;
+        if (std.mem.eql(u8, et, "content_block_start")) {
+            const cb = event.content_block orelse return;
+            const ct = cb.type orelse return;
+            if (std.mem.eql(u8, ct, "tool_use")) {
+                try self.tool_blocks.append(self.arena, .{
+                    .index = event.index orelse 0,
+                    .id = if (cb.id) |id| try self.arena.dupe(u8, id) else "",
+                    .name = if (cb.name) |n| try self.arena.dupe(u8, n) else "",
+                });
+            }
+        } else if (std.mem.eql(u8, et, "content_block_delta")) {
+            const d = event.delta orelse return;
+            const dt = d.type orelse return;
+            if (std.mem.eql(u8, dt, "text_delta")) {
+                if (d.text) |txt| {
+                    try self.text.appendSlice(self.arena, txt);
+                    self.on_text_fn(self.on_text_ctx, txt);
+                }
+            } else if (std.mem.eql(u8, dt, "input_json_delta")) {
+                if (d.partial_json) |pj| {
+                    const idx = event.index orelse return;
+                    for (self.tool_blocks.items) |*b| {
+                        if (b.index == idx) {
+                            try b.json.appendSlice(self.arena, pj);
+                            break;
+                        }
+                    }
+                }
+            }
+        } else if (std.mem.eql(u8, et, "message_start")) {
+            if (event.message) |m| {
+                if (m.usage) |u| self.usage = u;
+            }
+        } else if (std.mem.eql(u8, et, "message_delta")) {
+            if (event.delta) |d| {
+                if (d.stop_reason) |sr| self.stop_reason = sr;
+            }
+            // message_delta reports the cumulative output count; keep the
+            // input/cache counts from message_start.
+            if (event.usage) |u| {
+                if (u.output_tokens) |ot| self.usage.output_tokens = ot;
+            }
+        }
+    }
+
+    /// Assemble the accumulated deltas into a `MessageResponse`. Call once, after
+    /// the stream completes and `err` is clear.
+    pub fn response(self: *StreamAccumulator) error{OutOfMemory}!MessageResponse {
+        var blocks: std.ArrayListUnmanaged(types.ContentBlock) = .empty;
+        if (self.text.items.len > 0) {
+            try blocks.append(self.arena, .{ .type = "text", .text = self.text.items });
+        }
+        for (self.tool_blocks.items) |tb| {
+            const input: ?std.json.Value = if (tb.json.items.len > 0)
+                (std.json.parseFromSliceLeaky(std.json.Value, self.arena, tb.json.items, .{}) catch null)
+            else
+                null;
+            try blocks.append(self.arena, .{ .type = "tool_use", .id = tb.id, .name = tb.name, .input = input });
+        }
+        return .{
+            .content = if (blocks.items.len > 0) blocks.items else null,
+            .stop_reason = self.stop_reason,
+            .usage = self.usage,
+        };
+    }
+};
+
 // --- Models ---
 
 /// List available models.
@@ -346,4 +450,52 @@ test "listModels: missing api key" {
     var client = Client.init(std.testing.allocator, "", .{});
     defer client.deinit();
     try std.testing.expectError(error.MissingApiKey, client.listModels());
+}
+
+const TextProbe = struct {
+    count: usize = 0,
+    text: std.ArrayListUnmanaged(u8) = .empty,
+
+    fn cb(ptr: *anyopaque, delta: []const u8) void {
+        const self: *TextProbe = @ptrCast(@alignCast(ptr));
+        self.count += 1;
+        self.text.appendSlice(std.testing.allocator, delta) catch {};
+    }
+};
+
+test "StreamAccumulator reassembles text and a tool_use block into a MessageResponse" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var probe = TextProbe{};
+    defer probe.text.deinit(std.testing.allocator);
+
+    var acc = StreamAccumulator.init(arena.allocator(), &probe, TextProbe.cb);
+    const events = [_]StreamEvent{
+        .{ .type = "message_start", .message = .{ .usage = .{ .input_tokens = 10, .output_tokens = 1 } } },
+        .{ .type = "content_block_start", .index = 0, .content_block = .{ .type = "text" } },
+        .{ .type = "content_block_delta", .index = 0, .delta = .{ .type = "text_delta", .text = "Let me " } },
+        .{ .type = "content_block_delta", .index = 0, .delta = .{ .type = "text_delta", .text = "search." } },
+        .{ .type = "content_block_start", .index = 1, .content_block = .{ .type = "tool_use", .id = "toolu_1", .name = "search" } },
+        .{ .type = "content_block_delta", .index = 1, .delta = .{ .type = "input_json_delta", .partial_json = "{\"q\":" } },
+        .{ .type = "content_block_delta", .index = 1, .delta = .{ .type = "input_json_delta", .partial_json = "\"cats\"}" } },
+        .{ .type = "content_block_stop", .index = 1 },
+        .{ .type = "message_delta", .delta = .{ .stop_reason = .tool_use }, .usage = .{ .output_tokens = 25 } },
+        .{ .type = "message_stop" },
+    };
+    for (events) |ev| acc.onEvent(ev);
+    try std.testing.expect(acc.err == null);
+
+    const msg = try acc.response();
+    try std.testing.expectEqual(@as(usize, 2), probe.count);
+    try std.testing.expectEqualStrings("Let me search.", probe.text.items);
+    try std.testing.expectEqualStrings("Let me search.", msg.text().?);
+    try std.testing.expectEqual(types.StopReason.tool_use, msg.stop_reason.?);
+    try std.testing.expectEqual(@as(?i32, 10), msg.usage.?.input_tokens);
+    try std.testing.expectEqual(@as(?i32, 25), msg.usage.?.output_tokens);
+
+    const tool = msg.firstToolUse().?;
+    try std.testing.expectEqualStrings("toolu_1", tool.id.?);
+    try std.testing.expectEqualStrings("search", tool.name.?);
+    try std.testing.expectEqualStrings("cats", tool.input.?.object.get("q").?.string);
 }

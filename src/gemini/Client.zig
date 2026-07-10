@@ -2,6 +2,7 @@ const std = @import("std");
 const types = @import("types.zig");
 const http = @import("../http.zig");
 const retry = @import("../retry.zig");
+const json = @import("../json.zig");
 
 pub const RetryPolicy = retry.RetryPolicy;
 
@@ -407,6 +408,78 @@ pub fn generateContentStreamFromText(
     const contents = [_]Content{.{ .role = "user", .parts = &parts }};
     return self.generateContentStream(model, &contents, config, options, context, callback);
 }
+
+/// Reassembles a streamed generation into the same `GenerateContentResponse` the
+/// non-streaming `generateContent` returns. Text parts are concatenated (and
+/// forwarded to `on_text_fn`); function-call parts arrive complete per chunk;
+/// the last `finishReason` and `usageMetadata` win. All storage lives in `arena`.
+pub const StreamAccumulator = struct {
+    arena: std.mem.Allocator,
+    on_text_ctx: *anyopaque,
+    on_text_fn: *const fn (*anyopaque, []const u8) void,
+    text: std.ArrayListUnmanaged(u8) = .empty,
+    fn_parts: std.ArrayListUnmanaged(Part) = .empty,
+    finish_reason: ?types.FinishReason = null,
+    usage: ?types.UsageMetadata = null,
+    err: ?error{OutOfMemory} = null,
+
+    pub fn init(
+        arena: std.mem.Allocator,
+        on_text_ctx: *anyopaque,
+        on_text_fn: *const fn (*anyopaque, []const u8) void,
+    ) StreamAccumulator {
+        return .{ .arena = arena, .on_text_ctx = on_text_ctx, .on_text_fn = on_text_fn };
+    }
+
+    pub fn onEvent(self: *StreamAccumulator, chunk: GenerateContentResponse) void {
+        self.handle(chunk) catch |e| {
+            self.err = e;
+        };
+    }
+
+    fn handle(self: *StreamAccumulator, chunk: GenerateContentResponse) error{OutOfMemory}!void {
+        // `text()` already skips `thought` parts, so this never leaks reasoning.
+        if (chunk.text()) |txt| {
+            if (txt.len > 0) {
+                try self.text.appendSlice(self.arena, txt);
+                self.on_text_fn(self.on_text_ctx, txt);
+            }
+        }
+        if (chunk.usageMetadata) |u| self.usage = u;
+        const candidates = chunk.candidates orelse return;
+        if (candidates.len == 0) return;
+        if (candidates[0].finishReason) |fr| self.finish_reason = fr;
+        const content = candidates[0].content orelse return;
+        for (content.parts) |p| {
+            const fc = p.functionCall orelse continue;
+            // Strings/values point into the transient parsed chunk; dupe them.
+            try self.fn_parts.append(self.arena, .{
+                .functionCall = .{
+                    .id = if (fc.id) |id| try self.arena.dupe(u8, id) else null,
+                    .name = if (fc.name) |n| try self.arena.dupe(u8, n) else null,
+                    .args = if (fc.args) |v| try json.dupeValue(self.arena, v) else null,
+                },
+                .thoughtSignature = if (p.thoughtSignature) |ts| try self.arena.dupe(u8, ts) else null,
+            });
+        }
+    }
+
+    /// Assemble the accumulated deltas into a `GenerateContentResponse`. Call
+    /// once, after the stream completes and `err` is clear.
+    pub fn response(self: *StreamAccumulator) error{OutOfMemory}!GenerateContentResponse {
+        var parts: std.ArrayListUnmanaged(Part) = .empty;
+        if (self.text.items.len > 0) {
+            try parts.append(self.arena, .{ .text = self.text.items });
+        }
+        try parts.appendSlice(self.arena, self.fn_parts.items);
+        const candidate = types.Candidate{
+            .content = .{ .parts = parts.items },
+            .finishReason = self.finish_reason,
+        };
+        const candidates = try self.arena.dupe(types.Candidate, &.{candidate});
+        return .{ .candidates = candidates, .usageMetadata = self.usage };
+    }
+};
 
 // --- Model Management ---
 
@@ -1059,4 +1132,47 @@ test "isChatModel keeps multimodal text+image variants" {
     // though they also handle images.
     try std.testing.expect(isChatModel(T.m("models/gemini-2.5-flash-image", &generate)));
     try std.testing.expect(isChatModel(T.m("models/nano-banana-pro-preview", &generate)));
+}
+
+const TextProbe = struct {
+    count: usize = 0,
+    text: std.ArrayListUnmanaged(u8) = .empty,
+
+    fn cb(ptr: *anyopaque, delta: []const u8) void {
+        const self: *TextProbe = @ptrCast(@alignCast(ptr));
+        self.count += 1;
+        self.text.appendSlice(std.testing.allocator, delta) catch {};
+    }
+};
+
+test "StreamAccumulator reassembles text and a function call into a GenerateContentResponse" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var probe = TextProbe{};
+    defer probe.text.deinit(std.testing.allocator);
+
+    var args = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, "{\"q\":\"birds\"}", .{});
+    defer args.deinit();
+
+    var acc = StreamAccumulator.init(arena.allocator(), &probe, TextProbe.cb);
+    const text_a = [_]Part{.{ .text = "Search" }};
+    const text_b = [_]Part{.{ .text = "ing." }};
+    const fc = [_]Part{.{ .functionCall = .{ .name = "search", .args = args.value } }};
+    const chunks = [_]GenerateContentResponse{
+        .{ .candidates = &.{.{ .content = .{ .parts = &text_a } }} },
+        .{ .candidates = &.{.{ .content = .{ .parts = &text_b } }} },
+        .{ .candidates = &.{.{ .content = .{ .parts = &fc }, .finishReason = .STOP }} },
+        .{ .usageMetadata = .{ .promptTokenCount = 8, .candidatesTokenCount = 4, .totalTokenCount = 12 } },
+    };
+    for (chunks) |c| acc.onEvent(c);
+    try std.testing.expect(acc.err == null);
+
+    const resp = try acc.response();
+    try std.testing.expectEqual(@as(usize, 2), probe.count);
+    try std.testing.expectEqualStrings("Searching.", resp.text().?);
+    try std.testing.expectEqual(@as(?i32, 4), resp.usageMetadata.?.candidatesTokenCount);
+
+    const call = resp.firstFunctionCall().?;
+    try std.testing.expectEqualStrings("search", call.name.?);
+    try std.testing.expectEqualStrings("birds", call.args.?.object.get("q").?.string);
 }
