@@ -293,15 +293,19 @@ fn streamLines(
     var redirect_buf: [0]u8 = undefined;
     var response = try req.receiveHead(&redirect_buf);
 
-    const status_code: u10 = @intFromEnum(response.head.status);
-    if (status_code < 200 or status_code >= 300) {
-        error_handler.setErrorDetail(status_code, "");
-        return error.ApiError;
-    }
-
     const transfer_buf = try allocator.alloc(u8, 256 * 1024);
     defer allocator.free(transfer_buf);
     const reader = response.reader(transfer_buf);
+
+    const status_code: u10 = @intFromEnum(response.head.status);
+    if (status_code < 200 or status_code >= 300) {
+        // Read the error body so the failure carries a message, not just a status.
+        var body: std.Io.Writer.Allocating = .init(allocator);
+        defer body.deinit();
+        _ = reader.streamRemaining(&body.writer) catch {};
+        error_handler.setErrorDetail(status_code, body.written());
+        return error.ApiError;
+    }
 
     while (true) {
         const line = reader.takeDelimiter('\n') catch |err| switch (err) {
